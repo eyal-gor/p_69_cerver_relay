@@ -1181,7 +1181,11 @@ class RelayClient:
             return False
         api_url = f"https://api.github.com/repos/{RELAY_GITHUB_REPO}/commits/main"
         try:
-            async with httpx.AsyncClient(timeout=10) as client:
+            # follow_redirects=True is required: GitHub returns 301 when the
+            # owner has been renamed (e.g. account migrated from gneyal to
+            # eyal-gor). Without it the poll silently fails forever and
+            # auto-update appears to work but never picks up new commits.
+            async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
                 resp = await client.get(api_url, headers={"Accept": "application/vnd.github+json"})
             if resp.status_code != 200:
                 return False
@@ -1240,7 +1244,7 @@ class RelayClient:
                 headers = {"Accept": "application/vnd.github+json"}
                 if last_etag:
                     headers["If-None-Match"] = last_etag
-                async with httpx.AsyncClient(timeout=15) as client:
+                async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
                     resp = await client.get(api_url, headers=headers)
                 if resp.status_code == 304:
                     # No change since last poll — doesn't count against
