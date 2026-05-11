@@ -57,6 +57,24 @@ async def execute_local_request(local_port: int, request: Dict[str, Any]) -> Dic
                 "status": response.status_code,
                 "body": response_body,
             }
+    except (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout) as exc:
+        # The cloud-side caller sees this string verbatim (cerver bubbles
+        # it up as the session-create error), so label it clearly:
+        # "All connection attempts failed" coming from httpx looks like a
+        # cloud↔relay network problem, but this branch only fires when
+        # the relay can't reach its own local HTTP server.
+        return {
+            "type": "response",
+            "id": request_id,
+            "status": 500,
+            "body": {
+                "error": (
+                    f"Relay's local HTTP server at {url} did not respond "
+                    f"({type(exc).__name__}: {exc}). The relay process is "
+                    f"likely deadlocked — restart the relay."
+                ),
+            },
+        }
     except Exception as exc:
         return {
             "type": "response",

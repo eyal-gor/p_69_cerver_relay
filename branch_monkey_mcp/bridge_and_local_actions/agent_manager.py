@@ -1026,19 +1026,16 @@ class LocalAgentManager:
 
         print(f"[LocalAgent] Killing agent {agent_id}")
 
-        # Cancel output reading task first
-        if agent_id in self._output_tasks:
-            self._output_tasks[agent_id].cancel()
-            del self._output_tasks[agent_id]
-
-        # Close stdout pipe to release file descriptor
-        if agent.process and agent.process.stdout:
-            try:
-                agent.process.stdout.close()
-            except Exception:
-                pass
-
-        # Terminate the process
+        # Terminate the child process FIRST. _read_json_output offloads
+        # stdout.readline() to the default ThreadPoolExecutor; that worker
+        # thread holds Python's BufferedReader lock for the duration of
+        # the read. If we close stdout while a readline() is in flight,
+        # close() blocks on the same lock and deadlocks the whole asyncio
+        # loop — which on the uvicorn thread also stops the local HTTP
+        # server from accepting new connections. Terminating the child
+        # closes the pipe from the writer side, so readline() returns
+        # b'' and the worker releases the lock; close() below is then
+        # instant.
         if agent.process:
             try:
                 agent.process.terminate()
@@ -1063,6 +1060,21 @@ class LocalAgentManager:
                     os.kill(agent.pid, signal.SIGKILL)
                 except Exception:
                     pass
+
+        # Cancel the asyncio Task. Note: task.cancel() does NOT cancel
+        # the executor thread running read_line — but the child is dead
+        # now, so that thread is already unwinding on its own.
+        if agent_id in self._output_tasks:
+            self._output_tasks[agent_id].cancel()
+            del self._output_tasks[agent_id]
+
+        # Close stdout pipe to release the file descriptor. Safe now
+        # that the reader has stopped.
+        if agent.process and agent.process.stdout:
+            try:
+                agent.process.stdout.close()
+            except Exception:
+                pass
 
         agent.status = "stopped"
 
