@@ -154,6 +154,14 @@ TOKEN_FILE = CONFIG_DIR / "relay_token.json"
 MACHINE_ID_FILE = CONFIG_DIR / "machine_id"
 PERSISTENT_CONFIG_FILE = CONFIG_DIR / "config.json"
 
+# Cerver-side config — Infisical Universal Auth creds the relay uses to
+# fetch its own secrets at runtime. Lives under ~/.cerver/ to keep the
+# split clean between "kompany account state" (~/.kompany/) and "cerver
+# runtime secrets" (~/.cerver/). The install script (or the relay's first
+# launch, see _bootstrap_cerver_credentials) writes this file.
+CERVER_DIR = Path.home() / ".cerver"
+CERVER_INFISICAL_ENV = CERVER_DIR / "infisical.env"
+
 # Cloud API URL - fallback if /api/config fetch fails
 FALLBACK_CLOUD_URL = "https://kompany.dev"
 
@@ -938,6 +946,13 @@ class RelayClient:
             return
 
         self._running = True
+
+        # Bootstrap CERVER_API_TOKEN before attempting cerver registration.
+        # Idempotent: if the env var is already set, or the token was
+        # cached on a previous launch, this is a no-op. Otherwise it
+        # fetches the trio from kompany.dev and the token from Infisical.
+        await self._bootstrap_cerver_credentials()
+
         await self._register_cerver_compute()
 
         # Initial connection
@@ -1030,6 +1045,132 @@ class RelayClient:
         except Exception as e:
             print(f"[Relay] Warning: Could not register compute node: {e}")
             self._tui_update(registered=str(e)[:80])
+
+    def _read_cerver_env_file(self) -> Dict[str, str]:
+        """Parse ~/.cerver/infisical.env if present. Empty dict if missing."""
+        if not CERVER_INFISICAL_ENV.exists():
+            return {}
+        out: Dict[str, str] = {}
+        try:
+            for line in CERVER_INFISICAL_ENV.read_text().splitlines():
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                out[k.strip()] = v.strip().strip('"').strip("'")
+        except Exception as e:
+            print(f"[Relay] Warning: failed to read {CERVER_INFISICAL_ENV}: {e}")
+        return out
+
+    def _write_cerver_env_file(self, creds: Dict[str, str]) -> None:
+        """Persist the Infisical Universal Auth trio to ~/.cerver/infisical.env."""
+        CERVER_DIR.mkdir(parents=True, exist_ok=True)
+        try:
+            CERVER_DIR.chmod(0o700)
+        except Exception:
+            pass
+        contents = (
+            f"INFISICAL_CLIENT_ID={creds.get('client_id', '')}\n"
+            f"INFISICAL_TOKEN={creds.get('client_secret', '')}\n"
+            f"INFISICAL_PROJECT_ID={creds.get('project_id', '')}\n"
+            f"INFISICAL_ENV={creds.get('environment', 'prod')}\n"
+        )
+        CERVER_INFISICAL_ENV.write_text(contents)
+        try:
+            CERVER_INFISICAL_ENV.chmod(0o600)
+        except Exception:
+            pass
+
+    async def _bootstrap_cerver_credentials(self) -> None:
+        """
+        Ensure self.cerver_api_token is populated, fetching from Infisical
+        on the fly. Idempotent — no-ops if a value is already set.
+
+        Sequence:
+          1. If self.cerver_api_token already set (env var or constructor arg) → done.
+          2. Look for Infisical Universal Auth creds in ~/.cerver/infisical.env
+             (written by `install.sh` historically; written by step 3 below
+             on first launch from now on).
+          3. If absent, call kompany's /api/account/infisical/relay-credentials
+             using the device-auth token we just obtained, save the trio.
+          4. Login to Infisical with the trio, fetch CERVER_API_TOKEN, stash
+             it on `self.cerver_api_token`.
+
+        The relay's launch command never needs CERVER_API_TOKEN in env — it
+        bootstraps itself. The user signs in once (device auth), everything
+        else cascades.
+        """
+        if self.cerver_api_token:
+            return
+
+        env = self._read_cerver_env_file()
+        client_id = env.get("INFISICAL_CLIENT_ID")
+        client_secret = env.get("INFISICAL_TOKEN")
+        project_id = env.get("INFISICAL_PROJECT_ID")
+        environment = env.get("INFISICAL_ENV") or "prod"
+
+        # Fetch the trio from kompany if we don't have it yet.
+        if not (client_id and client_secret and project_id):
+            if not self.access_token:
+                print("[Relay] No device-auth token; cannot fetch Infisical credentials.")
+                return
+            try:
+                async with httpx.AsyncClient() as client:
+                    resp = await client.get(
+                        f"{self.cloud_url}/api/account/infisical/relay-credentials",
+                        headers={"Authorization": f"Bearer {self.access_token}"},
+                        timeout=20
+                    )
+                if resp.status_code == 404:
+                    print("[Relay] No Infisical vault provisioned for this org yet — skipping bootstrap.")
+                    return
+                resp.raise_for_status()
+                payload = resp.json()
+                client_id = payload["client_id"]
+                client_secret = payload["client_secret"]
+                project_id = payload["project_id"]
+                environment = payload.get("environment") or "prod"
+                self._write_cerver_env_file({
+                    "client_id": client_id,
+                    "client_secret": client_secret,
+                    "project_id": project_id,
+                    "environment": environment
+                })
+                print(f"[Relay] Fetched Infisical credentials for {self.org_name or 'org'}")
+            except Exception as e:
+                print(f"[Relay] Could not fetch Infisical credentials: {e}")
+                return
+
+        # Login to Infisical, then fetch CERVER_API_TOKEN.
+        try:
+            async with httpx.AsyncClient() as client:
+                login = await client.post(
+                    "https://app.infisical.com/api/v1/auth/universal-auth/login",
+                    json={"clientId": client_id, "clientSecret": client_secret},
+                    timeout=15
+                )
+                login.raise_for_status()
+                inf_token = login.json()["accessToken"]
+                secret_resp = await client.get(
+                    "https://app.infisical.com/api/v3/secrets/raw/CERVER_API_TOKEN",
+                    params={
+                        "workspaceId": project_id,
+                        "environment": environment,
+                        "secretPath": "/"
+                    },
+                    headers={"Authorization": f"Bearer {inf_token}"},
+                    timeout=15
+                )
+                if secret_resp.status_code == 404:
+                    print("[Relay] CERVER_API_TOKEN not found in Infisical — set it in /account/settings.")
+                    return
+                secret_resp.raise_for_status()
+                value = secret_resp.json().get("secret", {}).get("secretValue")
+                if value:
+                    self.cerver_api_token = value
+                    print("[Relay] Loaded CERVER_API_TOKEN from Infisical")
+        except Exception as e:
+            print(f"[Relay] Failed to load CERVER_API_TOKEN from Infisical: {e}")
 
     def _ensure_cerver_client(self) -> Optional[CerverComputeClient]:
         if not self.cerver_url:
