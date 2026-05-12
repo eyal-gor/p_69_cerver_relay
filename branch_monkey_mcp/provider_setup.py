@@ -101,7 +101,9 @@ def _verify_daytona(creds: Dict[str, str]) -> Tuple[bool, str]:
 
 
 PROVIDERS: Dict[str, Dict] = {
+    # ─── Model providers — supply the LLM that writes the session ─
     "anthropic": {
+        "kind": "model",
         "display_name": "Anthropic",
         "tagline": "Claude models",
         "credentials_url": "https://console.anthropic.com/settings/keys",
@@ -111,6 +113,7 @@ PROVIDERS: Dict[str, Dict] = {
         "verify": _verify_anthropic,
     },
     "openai": {
+        "kind": "model",
         "display_name": "OpenAI",
         "tagline": "GPT models, Codex CLI",
         "credentials_url": "https://platform.openai.com/api-keys",
@@ -120,6 +123,7 @@ PROVIDERS: Dict[str, Dict] = {
         "verify": _verify_openai,
     },
     "xai": {
+        "kind": "model",
         "display_name": "xAI",
         "tagline": "Grok models",
         "credentials_url": "https://console.x.ai/team/default/api-keys",
@@ -128,9 +132,12 @@ PROVIDERS: Dict[str, Dict] = {
         ],
         "verify": _verify_xai,
     },
+
+    # ─── Compute providers — supply the sandbox the session runs in ─
     "vercel": {
+        "kind": "compute",
         "display_name": "Vercel Sandbox",
-        "tagline": "Cloud compute (sandbox)",
+        "tagline": "Cloud sandbox",
         "credentials_url": "https://vercel.com/account/tokens",
         "secrets": [
             {"key": "VERCEL_TOKEN",      "label": "Token", "hidden": True},
@@ -140,8 +147,9 @@ PROVIDERS: Dict[str, Dict] = {
         "verify": _verify_vercel,
     },
     "e2b": {
+        "kind": "compute",
         "display_name": "E2B",
-        "tagline": "Cloud compute (sandbox)",
+        "tagline": "Cloud sandbox",
         "credentials_url": "https://e2b.dev/dashboard/keys",
         "secrets": [
             {"key": "E2B_API_KEY", "label": "API Key", "hidden": True},
@@ -149,8 +157,9 @@ PROVIDERS: Dict[str, Dict] = {
         "verify": _verify_e2b,
     },
     "modal": {
+        "kind": "compute",
         "display_name": "Modal",
-        "tagline": "Cloud compute (GPU + CPU)",
+        "tagline": "GPU + CPU compute",
         "credentials_url": "https://modal.com/settings/tokens",
         "secrets": [
             {"key": "MODAL_TOKEN_ID",     "label": "Token ID (ak-...)", "hidden": False},
@@ -159,8 +168,9 @@ PROVIDERS: Dict[str, Dict] = {
         "verify": None,  # Modal's auth is gRPC; no clean HTTP verify.
     },
     "daytona": {
+        "kind": "compute",
         "display_name": "Daytona",
-        "tagline": "Cloud compute (workspace)",
+        "tagline": "Cloud workspace",
         "credentials_url": "https://app.daytona.io/dashboard/keys",
         "secrets": [
             {"key": "DAYTONA_API_KEY", "label": "API Key", "hidden": True},
@@ -274,25 +284,42 @@ def prompt_for_secrets(provider_key: str) -> Dict[str, str]:
 
 def add_one_provider(cfg: Dict[str, str]) -> bool:
     """Run a single provider-add cycle. Returns True if user wants to continue."""
+    # Group by kind so the menu makes the conceptual split visible —
+    # model providers (who's writing) vs compute providers (where it runs).
+    # Numbering stays sequential across groups so a single number picks any.
     keys = list(PROVIDERS.keys())
+    model_keys   = [k for k in keys if PROVIDERS[k]["kind"] == "model"]
+    compute_keys = [k for k in keys if PROVIDERS[k]["kind"] == "compute"]
     print()
     print(f"{BOLD}Pick a provider to add:{NC}")
-    for i, k in enumerate(keys, 1):
-        p = PROVIDERS[k]
-        print(f"  {i}) {p['display_name']:<15} {MUTED}— {p['tagline']}{NC}")
-    print(f"  q) Quit")
+    n = 1
+    if model_keys:
+        print(f"\n  {MUTED}MODEL PROVIDERS{NC}  {MUTED}— who writes the session{NC}")
+        for k in model_keys:
+            p = PROVIDERS[k]
+            print(f"  {n}) {p['display_name']:<15} {MUTED}— {p['tagline']}{NC}")
+            n += 1
+    if compute_keys:
+        print(f"\n  {MUTED}COMPUTE PROVIDERS{NC} {MUTED}— where the session runs{NC}")
+        for k in compute_keys:
+            p = PROVIDERS[k]
+            print(f"  {n}) {p['display_name']:<15} {MUTED}— {p['tagline']}{NC}")
+            n += 1
+    print(f"\n  q) Quit")
 
     raw = input(f"\n{BOLD}Choice:{NC} ").strip().lower()
     if raw == "q" or raw == "":
         return False
 
+    # The ordered key list matches the displayed numbering (models first).
+    ordered_keys = model_keys + compute_keys
     try:
         idx = int(raw) - 1
-        if idx < 0 or idx >= len(keys):
+        if idx < 0 or idx >= len(ordered_keys):
             raise ValueError
-        provider_key = keys[idx]
+        provider_key = ordered_keys[idx]
     except ValueError:
-        print(f"  {ERROR}Not a valid choice — pick a number 1-{len(keys)} or q to quit.{NC}")
+        print(f"  {ERROR}Not a valid choice — pick a number 1-{len(ordered_keys)} or q to quit.{NC}")
         return True
 
     p = PROVIDERS[provider_key]
@@ -345,8 +372,14 @@ def add_one_provider(cfg: Dict[str, str]) -> bool:
 
     print()
     if all_ok:
+        kind = p["kind"]
+        usage = (
+            f"a model harness ({provider_key})"
+            if kind == "model"
+            else f"compute: {{ provider: '{provider_key}' }}"
+        )
         print(f"  {GREEN}{BOLD}✓ {p['display_name']} is ready.{NC}")
-        print(f"  {MUTED}Cerver sessions can now use compute / model = {provider_key}.{NC}")
+        print(f"  {MUTED}Cerver sessions can now use {usage}.{NC}")
     else:
         print(f"  {ERROR}Some secrets didn't push. Check your Infisical permissions.{NC}")
 
