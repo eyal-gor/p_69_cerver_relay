@@ -136,7 +136,12 @@ CURRENT_COMMIT_SHA = _current_commit_sha()
 # Public github repo to poll for auto-updates. Same URL the install.sh uses
 # for uvx; can be overridden via env for forks.
 RELAY_GITHUB_REPO = os.environ.get(
-    "RELAY_UPDATE_REPO", "gneyal/p_69_branch_monkey_mcp"
+    # Canonical repo after the May 2026 rename. Old self-installed
+    # relays polling gneyal/p_69_branch_monkey_mcp keep working via
+    # GitHub's user+repo rename redirects (our httpx call has
+    # follow_redirects=True). New installs poll the canonical URL
+    # directly — one fewer redirect hop.
+    "RELAY_UPDATE_REPO", "eyal-gor/p_69_cerver_relay"
 )
 # How often to poll GitHub for a newer commit. Default 10 min — short enough
 # to roll out fixes within a coffee break, long enough to stay well under
