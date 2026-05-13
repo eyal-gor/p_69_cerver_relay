@@ -476,6 +476,13 @@ class LocalAgentManager:
                     continue
                 if agent.session_id and agent.session_id != before_session_id:
                     print(f"[LocalAgent] Got session_id: {agent.session_id}")
+                    # Push to cerver so the gateway can hand it back to a
+                    # future /input call as a recovery hint. Without this,
+                    # a relay restart loses the only copy of the CLI's
+                    # resume id and the session can never be resumed
+                    # cleanly. Fire-and-forget — transcript pushes carry
+                    # most of the value even if this PATCH drops.
+                    asyncio.create_task(self._push_cli_state_to_cerver(agent))
                 await broadcast_to_agent_listeners(agent, event)
 
                 # Live: publish to cerver-connect for browser/CLI subscribers.
@@ -683,6 +690,115 @@ class LocalAgentManager:
                 return None
             first_wait = False
             await asyncio.sleep(0.1)
+
+    def recover_agent(
+        self,
+        agent_id: str,
+        *,
+        cli_session_id: Optional[str],
+        cli_tool: Optional[str],
+        working_dir: Optional[str],
+        cerver_session_id: Optional[str],
+    ) -> Optional[dict]:
+        """Rebuild a relay-side agent record from cerver-forwarded hints.
+
+        Used by `send_input` when the local agent_id isn't in `_agents`
+        (relay restart, stale cleanup, etc.). We register a "paused"
+        agent with the cerver-supplied resume id on `agent.session_id`
+        so the very next `resume_session()` call uses
+        `provider.build_resume_command(prompt, cli_session_id)` — the
+        CLI's own resume mechanism (provider-agnostic; works for claude
+        `--resume`, codex `exec resume`, grok `--resume`, etc.).
+
+        Returns the new agent's dict shape on success, None when we
+        can't recover (no cli_session_id → no resume hint, caller should
+        fall back to fresh-spawn).
+        """
+        if agent_id in self._agents:
+            return None  # already alive — nothing to recover
+
+        if not cli_session_id:
+            # No resume id captured server-side. Could still spawn fresh
+            # against the user's input but we'd lose conversation history
+            # entirely — caller decides whether that's acceptable.
+            return None
+
+        resolved_dir = working_dir or os.path.expanduser("~")
+        agent = LocalAgent(
+            id=agent_id,
+            task_id=None,
+            task_number=None,
+            task_title="recovered",
+            task_description=None,
+            repo_dir=resolved_dir,
+            work_dir=resolved_dir,
+            worktree_path=None,
+            branch=None,
+            branch_created=False,
+            status="paused",  # resume_session uses --resume when status in (paused, completed, failed)
+            cli_tool=(cli_tool or "claude"),
+            callback=(
+                {"cerver_session_id": cerver_session_id}
+                if cerver_session_id
+                else None
+            ),
+            session_id=cli_session_id,
+        )
+        self._agents[agent_id] = agent
+        print(
+            f"[LocalAgent] Recovered agent {agent_id} "
+            f"(cli_tool={agent.cli_tool}, cli_session_id={cli_session_id[:8]}…, dir={resolved_dir})"
+        )
+        return {
+            "id": agent_id,
+            "task_title": "recovered",
+            "status": "paused",
+            "cli_tool": agent.cli_tool,
+            "session_id": cli_session_id,
+            "work_dir": resolved_dir,
+            "type": "local",
+            "can_resume": True,
+        }
+
+    async def _push_cli_state_to_cerver(self, agent: LocalAgent) -> None:
+        """PATCH the cerver session's metadata with the CLI's resume id,
+        the CLI tool, and the working dir. These are the three pieces
+        the relay needs to recover the agent if its in-memory record is
+        gone — cerver hands them back on every /input forward.
+
+        Best effort. A failure here doesn't break the run; transcript
+        pushes still carry the conversation. Worst case is a future
+        recovery can't use --resume and has to fall back to fresh-spawn
+        (still works, just loses CLI-internal todos/tool history).
+
+        Provider-agnostic: `cli_session_id` is an opaque string the
+        relevant CLI provider knows how to consume (claude --resume,
+        codex exec resume, grok --resume).
+        """
+        target = await self._resolve_cerver_target(agent, wait_for_transport=False, timeout_seconds=0)
+        if target is None or not agent.session_id:
+            return
+        url = f"{target['url'].rstrip('/')}/v2/sessions/{target['session_id']}"
+        body = {
+            "metadata": {
+                "cli_session_id": agent.session_id,
+                "cli_tool": agent.cli_tool,
+                "working_dir": agent.work_dir,
+            }
+        }
+        try:
+            import httpx
+            async with httpx.AsyncClient(timeout=5) as client:
+                await client.patch(
+                    url,
+                    json=body,
+                    headers={
+                        "Authorization": f"Bearer {target['token']}",
+                        "Content-Type": "application/json",
+                    },
+                )
+        except Exception as e:
+            print(f"[LocalAgent] cli-state PATCH failed (non-fatal): {e}")
 
     def _post_transcript_entries(self, agent: LocalAgent, entries: list) -> None:
         """Fire-and-forget POST of transcript entries to cerver.

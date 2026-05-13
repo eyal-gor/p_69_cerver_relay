@@ -202,6 +202,14 @@ class InputRequest(BaseModel):
     # tells the relay to skip its own _push_user_message — otherwise
     # the user message lands twice in the transcript ~700ms apart.
     pre_logged: bool = False
+    # Recovery hints (also forwarded by cerver gateway). When the local
+    # agent_id isn't in the relay's in-memory _agents dict — relay
+    # restart, stale cleanup, machine migration — these let the relay
+    # rebuild a paused agent record and resume the conversation via the
+    # CLI's own --resume / `exec resume` flag (provider-agnostic).
+    cerver_session_id: Optional[str] = None
+    cli_session_id: Optional[str] = None
+    working_dir: Optional[str] = None
 
 
 def save_images_to_temp(images: List[ImageData]) -> List[str]:
@@ -539,8 +547,25 @@ def get_agent(agent_id: str):
 
 @router.post("/agents/{agent_id}/input")
 async def send_input(agent_id: str, request: InputRequest):
-    """Send input to agent (resumes session if paused)."""
+    """Send input to agent (resumes session if paused).
+
+    If the agent isn't in the relay's in-memory map AND the caller
+    supplied recovery hints (cerver does this on every /input forward),
+    rebuild a paused record and resume via the CLI's own --resume flag.
+    Lets conversations survive relay restarts and stale-agent reaping
+    without requiring the user to start over.
+    """
     agent = agent_manager.get(agent_id)
+    if not agent and (request.cli_session_id or request.cerver_session_id):
+        recovered = agent_manager.recover_agent(
+            agent_id,
+            cli_session_id=request.cli_session_id,
+            cli_tool=request.cli_tool,
+            working_dir=request.working_dir,
+            cerver_session_id=request.cerver_session_id,
+        )
+        if recovered:
+            agent = agent_manager.get(agent_id)
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
 
