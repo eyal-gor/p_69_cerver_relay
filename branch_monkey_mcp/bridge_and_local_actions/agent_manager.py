@@ -775,7 +775,15 @@ class LocalAgentManager:
         relevant CLI provider knows how to consume (claude --resume,
         codex exec resume, grok --resume).
         """
-        target = await self._resolve_cerver_target(agent, wait_for_transport=False, timeout_seconds=0)
+        # Wait briefly for the cerver-connect transport to be ready. The
+        # init event that triggers this push often fires within the first
+        # ~1s of an agent's life, which can race transport registration.
+        # Previously we used wait_for_transport=False with a 0s deadline,
+        # so a transport not-yet-ready meant the push silently dropped
+        # and cerver permanently lacked the recovery hint.
+        target = await self._resolve_cerver_target(
+            agent, wait_for_transport=True, timeout_seconds=5.0
+        )
         if target is None or not agent.session_id:
             return
         url = f"{target['url'].rstrip('/')}/v2/sessions/{target['session_id']}"
@@ -786,19 +794,53 @@ class LocalAgentManager:
                 "working_dir": agent.work_dir,
             }
         }
+
+        # Retry on 404 / 5xx / network errors — same shape as
+        # _post_transcript_entries. Without a successful PATCH, the
+        # session can never be recovered after a relay restart, so a
+        # transient failure here is much more costly than for transcript
+        # entries (which retry inside cerver too).
+        backoffs = [0.2, 0.4, 0.8, 1.5, 2.5]  # ~5.4s total
+        attempts = 0
+        last_status: Optional[int] = None
+        last_exc: Optional[Exception] = None
         try:
             import httpx
             async with httpx.AsyncClient(timeout=5) as client:
-                await client.patch(
-                    url,
-                    json=body,
-                    headers={
-                        "Authorization": f"Bearer {target['token']}",
-                        "Content-Type": "application/json",
-                    },
-                )
-        except Exception as e:
-            print(f"[LocalAgent] cli-state PATCH failed (non-fatal): {e}")
+                while True:
+                    attempts += 1
+                    try:
+                        resp = await client.patch(
+                            url,
+                            json=body,
+                            headers={
+                                "Authorization": f"Bearer {target['token']}",
+                                "Content-Type": "application/json",
+                            },
+                        )
+                        last_status = resp.status_code
+                        if resp.status_code < 300:
+                            return
+                        retryable = resp.status_code == 404 or resp.status_code >= 500
+                    except (httpx.RequestError, httpx.TimeoutException) as exc:
+                        last_exc = exc
+                        retryable = True
+                    if not retryable or attempts > len(backoffs):
+                        break
+                    await asyncio.sleep(backoffs[attempts - 1])
+        except Exception as exc:
+            last_exc = exc
+
+        if last_exc is not None:
+            print(
+                f"[LocalAgent] cli-state PATCH failed after {attempts} attempts: "
+                f"{type(last_exc).__name__}: {last_exc}"
+            )
+        else:
+            print(
+                f"[LocalAgent] cli-state PATCH failed after {attempts} attempts: "
+                f"HTTP {last_status}"
+            )
 
     def _post_transcript_entries(self, agent: LocalAgent, entries: list) -> None:
         """Fire-and-forget POST of transcript entries to cerver.
