@@ -856,6 +856,15 @@ class LocalAgentManager:
 
         new_entries = []
         for entry in entries:
+            # Mirror cerver's rule (sessions/service.ts:334) — every entry
+            # needs non-empty content unless kind=="tool_use" (those carry
+            # their payload in tool_input/tool_name). Claude occasionally
+            # emits empty text blocks (esp. on the very first event of a
+            # fresh session); pushing them gets a 400 that doesn't retry
+            # and pollutes the log without losing any real content.
+            if not entry.get("content") and entry.get("kind") != "tool_use":
+                agent._push_stats["empty_skipped"] = agent._push_stats.get("empty_skipped", 0) + 1
+                continue
             sig = self._entry_signature(entry)
             if sig in agent._pushed_signatures:
                 agent._push_stats["dedup_skipped"] += 1
