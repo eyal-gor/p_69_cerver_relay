@@ -59,6 +59,7 @@ def build_provider_agent_payload(
         "branch": metadata.get("branch"),
         "defer_start": is_passive or not has_bootstrap,
         "cli_tool": metadata.get("cli_tool"),
+        "cli_model": metadata.get("cli_model"),
         "prompt": None if is_passive else bootstrap_prompt,
     }
 
@@ -143,6 +144,7 @@ async def create_provider_session(
         branch=payload["branch"],
         defer_start=payload["defer_start"],
         cli_tool=payload["cli_tool"],
+        cli_model=payload["cli_model"],
         extra_env=extra_env,
         callback=callback,
     )

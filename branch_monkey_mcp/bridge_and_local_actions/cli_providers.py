@@ -113,8 +113,11 @@ class CliProvider:
         self,
         prompt: str,
         system_prompt: Optional[str] = None,
+        model: Optional[str] = None,
     ) -> CliCommand:
-        """Build command to run a new prompt."""
+        """Build command to run a new prompt. `model`, when set, overrides
+        the CLI's local default — passed in from cerver's session metadata
+        (metadata.cli_model) when the user runs `cerver run --model X`."""
         raise NotImplementedError
 
     def build_resume_command(
@@ -269,7 +272,7 @@ class ClaudeCodeProvider(CliProvider):
             env_inject=self._build_env_inject(),
         )
 
-    def build_run_command(self, prompt, system_prompt=None):
+    def build_run_command(self, prompt, system_prompt=None, model=None):
         args = [
             "claude",
             "-p", prompt,
@@ -277,6 +280,8 @@ class ClaudeCodeProvider(CliProvider):
             "--verbose",
             "--dangerously-skip-permissions"
         ]
+        if model:
+            args.extend(["--model", model])
         if system_prompt:
             args.extend(["--append-system-prompt", system_prompt])
 
@@ -452,12 +457,16 @@ class CodexProvider(CliProvider):
             env_inject=self.get_auth_env(),
         )
 
-    def build_run_command(self, prompt, system_prompt=None):
+    def build_run_command(self, prompt, system_prompt=None, model=None):
         prompt_file = self._write_prompt_file(prompt, system_prompt)
+        # codex supports -c key=value overrides on its global config —
+        # putting `-c model="<name>"` ahead of `exec` is the same as
+        # editing ~/.codex/config.toml's `model =` line for this call only.
+        model_arg = f' -c model="{model}"' if model else ""
         return CliCommand(
             args=[
                 "bash", "-c",
-                f"cat '{prompt_file}' | codex exec - --dangerously-bypass-approvals-and-sandbox --json; rm -f '{prompt_file}'"
+                f"cat '{prompt_file}' | codex{model_arg} exec - --dangerously-bypass-approvals-and-sandbox --json; rm -f '{prompt_file}'"
             ],
             env_overrides={},
             env_inject=self.get_auth_env(),
@@ -642,7 +651,7 @@ class GrokProvider(CliProvider):
 
         return {"authenticated": False, "method": "none", "detail": "No API key — get one at console.x.ai"}
 
-    def build_run_command(self, prompt, system_prompt=None):
+    def build_run_command(self, prompt, system_prompt=None, model=None):
         # grok-cli runs claude code under a proxy, so output is claude stream-json format.
         # We pass the API key via -k flag if stored, otherwise grok uses its keychain.
         args = ["grok"]
@@ -661,14 +670,14 @@ class GrokProvider(CliProvider):
         # grok-cli doesn't support passing prompts directly — it spawns
         # interactive claude. For our use case we run claude directly with
         # the proxy env vars that grok would set.
-        return self._grok_cli_command(prompt, "stream-json", auth_env, api_key)
+        return self._grok_cli_command(prompt, "stream-json", auth_env, api_key, model=model)
 
     def build_text_command(self, prompt, system_prompt=None, use_mcp=False):
         auth_env = self.get_auth_env()
         api_key = auth_env.get(self.api_key_env)
         return self._grok_cli_command(prompt, "text", auth_env, api_key, system_prompt)
 
-    def _grok_cli_command(self, prompt, output_format, auth_env, api_key, system_prompt=None):
+    def _grok_cli_command(self, prompt, output_format, auth_env, api_key, system_prompt=None, model=None):
         args = [
             "claude",
             "-p", prompt,
@@ -677,6 +686,8 @@ class GrokProvider(CliProvider):
         ]
         if output_format == "stream-json":
             args.append("--verbose")
+        if model:
+            args.extend(["--model", model])
         if system_prompt:
             args.extend(["--append-system-prompt", system_prompt])
         return CliCommand(

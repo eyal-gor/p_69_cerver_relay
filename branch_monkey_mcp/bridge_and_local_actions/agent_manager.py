@@ -40,6 +40,18 @@ from .git_utils import is_git_repo, get_current_branch, generate_branch_name
 from .worktree import create_worktree, find_worktree_for_branch, remove_worktree
 
 
+def _model_provider_for_cli(cli_tool: str) -> str:
+    """Map a cli_tool name → the upstream vendor for that CLI's models.
+    Used when stamping observed model info on session metadata so the
+    cerver UI can format "claude-sonnet-4-6 (anthropic)" without having
+    to infer the vendor from the model string."""
+    return {
+        "claude": "anthropic",
+        "codex": "openai",
+        "grok": "xai",
+    }.get((cli_tool or "").lower(), "")
+
+
 @dataclass
 class LocalAgent:
     """Represents a running local AI CLI agent."""
@@ -55,6 +67,7 @@ class LocalAgent:
     branch_created: bool
     status: str  # prepared, starting, running, paused, completed, failed, stopped
     cli_tool: str = ""  # Which CLI provider to use (resolved at creation time)
+    cli_model: str = ""  # Per-call model override forwarded to the CLI on spawn. Empty = use the CLI's local default (claude → Claude Code default, codex → ~/.codex/config.toml's `model`).
     pid: Optional[int] = None
     process: Optional[subprocess.Popen] = None
     output_buffer: List[str] = field(default_factory=list)
@@ -170,6 +183,7 @@ class LocalAgentManager:
         defer_start: bool = False,
         callback: Optional[Dict] = None,
         cli_tool: Optional[str] = None,
+        cli_model: Optional[str] = None,
         extra_env: Optional[Dict[str, str]] = None,
         complete_on_exit: bool = False,
     ) -> dict:
@@ -278,6 +292,7 @@ class LocalAgentManager:
                 branch_created=branch_created,
                 status="prepared",
                 cli_tool=provider.name,
+                cli_model=(cli_model or ""),
                 callback=callback,
                 extra_env=extra_env,
                 complete_on_exit=complete_on_exit,
@@ -381,7 +396,8 @@ class LocalAgentManager:
         """Spawn the CLI process and start reading output."""
         provider = self._get_provider(agent)
         cli_cmd = build_run_cli_command(
-            provider, final_prompt, system_prompt=system_prompt
+            provider, final_prompt, system_prompt=system_prompt,
+            model=(agent.cli_model or None),
         )
         process = spawn_cli_subprocess(cli_cmd, agent.work_dir, extra_env=agent.extra_env)
 
@@ -888,13 +904,23 @@ class LocalAgentManager:
         agent.usage_cumulative["output_tokens"] += int(usage.get("output_tokens") or 0)
         agent.usage_cumulative["turns"] += 1
 
-        body = {
-            "metadata": {
-                "usage_total": agent.usage_cumulative,
-                "usage_last": usage,
-                "usage_cli": agent.cli_tool,
-            }
+        body_metadata = {
+            "usage_total": agent.usage_cumulative,
+            "usage_last": usage,
+            "usage_cli": agent.cli_tool,
         }
+        # Record the actual model the CLI ran. Both claude and codex put it
+        # on the result event (claude: top-level `model`; codex: same after
+        # normalize_event). Surfacing it in metadata.cli_model lets cerver
+        # sessions / cerver show display "what actually ran" instead of
+        # forcing the user to grep transcripts. The user's requested model
+        # (from session-create metadata.cli_model) gets clobbered here on
+        # purpose — observed beats requested when they disagree.
+        observed_model = inner.get("model")
+        if isinstance(observed_model, str) and observed_model:
+            body_metadata["cli_model"] = observed_model
+            body_metadata["cli_model_provider"] = _model_provider_for_cli(agent.cli_tool)
+        body = {"metadata": body_metadata}
         asyncio.create_task(self._patch_session_metadata(agent, body))
 
     async def _patch_session_metadata(self, agent: LocalAgent, body: Dict) -> None:

@@ -63,9 +63,13 @@ def build_run_cli_command(
     provider: CliProvider,
     prompt: str,
     system_prompt: Optional[str] = None,
+    model: Optional[str] = None,
 ):
-    """Build a new-run CLI command for a provider."""
-    return provider.build_run_command(prompt, system_prompt=system_prompt)
+    """Build a new-run CLI command for a provider. `model` is the
+    per-call override coming from cerver session metadata.cli_model
+    (set by `cerver run --model X`); each provider injects it into
+    its own native flag (claude/grok: --model; codex: -c model=...)."""
+    return provider.build_run_command(prompt, system_prompt=system_prompt, model=model)
 
 
 def build_resume_cli_command(
