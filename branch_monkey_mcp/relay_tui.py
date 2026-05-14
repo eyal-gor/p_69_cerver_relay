@@ -559,6 +559,7 @@ class RelayTUI:
         # TRY — onboarding hints for the /cerver Claude Code skill. Renders
         # only until the first request lands; after the user is up and running
         # it auto-hides so STATUS / WORKLOAD / COMPUTE get the screen back.
+        # Tight 4 rows + header so the section doesn't overflow short terminals.
         if s.get("requests_handled", 0) == 0:
             y += 1
             self._put(stdscr, y, lbl_col, "TRY", self._dim())
@@ -570,21 +571,24 @@ class RelayTUI:
             y += 1
             self._hline(stdscr, y, col, bar_w)
             y += 1
+            # Wider command column so descriptions align cleanly and don't
+            # collide with the longest verb. Right edge guarded against the
+            # actual terminal width `w`, not the narrow `bar_w` hline.
+            cmd_col = lbl_col + 2
+            desc_col = cmd_col + 36  # 36 = len longest cmd ('/cerver move <session> <compute>') + 2 gap
             tips = (
-                ('/cerver run "<prompt>"',            "Send a prompt to this machine"),
-                ('/cerver compare "<prompt>"',       "Same prompt → claude + codex side-by-side"),
-                ('/cerver computes',                  "List your registered computes"),
-                ('/cerver move <session> <compute>',  "Move a live session to another machine"),
+                ('/cerver run "<prompt>"',            "send a prompt to this machine"),
+                ('/cerver compare "<prompt>"',        "same prompt → claude + codex"),
+                ('/cerver computes',                   "list your registered computes"),
+                ('/cerver move <session> <compute>',  "move a live session"),
+                ('/cerver help',                       "all verbs"),
             )
             for cmd, desc in tips:
-                self._put(stdscr, y, lbl_col, "▸", self._dim())  # ▸
-                self._put(stdscr, y, lbl_col + 2, cmd, self._bold())
-                desc_col = lbl_col + 2 + len(cmd) + 2
-                if desc_col + len(desc) < bar_w + col:
+                self._put(stdscr, y, lbl_col, "▸", self._dim())
+                self._put(stdscr, y, cmd_col, cmd, self._bold())
+                if desc_col + len(desc) < w - 1:
                     self._put(stdscr, y, desc_col, desc, self._dim())
                 y += 1
-            self._put(stdscr, y, lbl_col + 2, "more:  /cerver help", self._dim())
-            y += 1
 
         y += 1
         self._put(stdscr, y, lbl_col, "STATUS", self._dim())
