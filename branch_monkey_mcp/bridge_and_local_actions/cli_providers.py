@@ -599,6 +599,36 @@ class CodexProvider(CliProvider):
                 "usage": raw_json.get("usage", {})
             }
 
+        # Failures — surface as a visible assistant message instead of
+        # dropping silently. Without this, an API rejection (e.g. invalid
+        # model name) lets the codex process exit cleanly but produces no
+        # transcript, so the CLI's WaitForReply hangs for 3 minutes and
+        # the user sees only "no reply within 3m0s" — no clue what broke.
+        if event_type in ("error", "turn.failed"):
+            err_msg = raw_json.get("message")
+            if not err_msg and isinstance(raw_json.get("error"), dict):
+                err_msg = raw_json["error"].get("message", "")
+            # OpenAI sometimes nests a JSON error blob inside `message`;
+            # unwrap the inner human-readable string when present.
+            if isinstance(err_msg, str) and err_msg.startswith("{"):
+                try:
+                    import json as _json
+                    parsed = _json.loads(err_msg)
+                    inner = parsed.get("error", {}).get("message")
+                    if inner:
+                        err_msg = inner
+                except Exception:
+                    pass
+            return {
+                "type": "assistant",
+                "message": {
+                    "content": [{
+                        "type": "text",
+                        "text": f"[codex error] {err_msg or 'unknown failure'}"
+                    }]
+                }
+            }
+
         # Pass through unknown events
         return raw_json
 
