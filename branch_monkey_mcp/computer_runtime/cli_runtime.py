@@ -27,9 +27,16 @@ def build_process_env(cli_cmd, extra_env: Optional[dict] = None) -> dict:
 
     Layering, lowest → highest precedence:
       1. host process env (os.environ)
-      2. cli_cmd.env_inject (provider-specific overrides)
-      3. Infisical-fetched secrets (cached by infisical_client)
+      2. Infisical-fetched secrets (cached vault defaults)
+      3. cli_cmd.env_inject (provider-specific overrides — intentional)
       4. extra_env (per-call caller intent — wins on conflict)
+
+    Why env_inject beats Infisical: providers occasionally repurpose a
+    standard env var (e.g. GrokProvider sets ANTHROPIC_API_KEY to the
+    xAI key so the claude CLI talks to api.x.ai). Letting Infisical's
+    real ANTHROPIC_API_KEY clobber that override sends an Anthropic
+    key to xAI's endpoint, which 400s as "Incorrect API key". The
+    provider knows what it's doing; Infisical does not.
 
     extra_env: caller-supplied env vars (e.g. project-scoped secrets passed
     through from kompany or cerver session metadata).
@@ -41,17 +48,16 @@ def build_process_env(cli_cmd, extra_env: Optional[dict] = None) -> dict:
     # Always remove CLAUDECODE to allow nested launches.
     env.pop("CLAUDECODE", None)
 
-    if cli_cmd.env_inject:
-        env.update(cli_cmd.env_inject)
-
-    # Layer Infisical-fetched secrets on top of host env so a rotated
-    # ANTHROPIC_API_KEY in Infisical reaches the next CLI spawn without a
-    # relay restart. extra_env still takes precedence so the caller's
-    # explicit per-session intent wins.
+    # Layer Infisical-fetched secrets first so a rotated key in the vault
+    # reaches the next CLI spawn without a relay restart — but only when
+    # the provider hasn't explicitly overridden the same var.
     if infisical_configured():
         infisical_env = get_secrets_sync()
         if infisical_env:
             env.update(infisical_env)
+
+    if cli_cmd.env_inject:
+        env.update(cli_cmd.env_inject)
 
     if extra_env:
         env.update(extra_env)
