@@ -526,18 +526,72 @@ class LocalAgentManager:
         if agent.process:
             agent.exit_code = agent.process.wait()
 
-        # Belt-and-suspenders: when the read loop exits, flush the final
-        # result text from the buffer to cerver. The streaming push already
-        # handles each event during the run, but if the cerver POST for the
-        # last event(s) failed (network blip, cerver 5xx) the transcript
-        # would otherwise miss the answer. Idempotency is OK — cerver will
-        # de-dup or just append; either way the answer is preserved.
+        # Belt-and-suspenders: when the read loop exits, flush a final
+        # transcript entry to cerver. Three cases:
+        #
+        #   1. Happy path — exit_code == 0 AND we have assistant text.
+        #      Push the text as an assistant entry. Same as before.
+        #   2. Hard failure — exit_code != 0 (CLI crashed / API rejected).
+        #      Push a `[cli_exit code=N]` diagnostic, with any partial
+        #      response appended and the last 500B of raw stream output
+        #      (which is where stderr lines and non-JSON noise live).
+        #   3. Silent failure — exit_code == 0 but no assistant text was
+        #      produced (CLI completed without ever emitting an
+        #      agent_message). Same diagnostic shape as (2).
+        #
+        # In ALL failure cases the diagnostic is pushed as a role=assistant
+        # entry so the cerver CLI's WaitForReply terminates immediately
+        # with a visible error, instead of polling for 3 minutes and
+        # returning "no reply within 3m0s" — silent failure is the worst
+        # failure.
         try:
             final_text = self._extract_result(agent)
-            if final_text:
+            exit_failed = bool(agent.exit_code and agent.exit_code != 0)
+
+            if final_text and not exit_failed:
                 self._post_transcript_entries(
                     agent,
                     [{"role": "assistant", "kind": "text", "content": final_text}],
+                )
+            else:
+                # Collect the last ~500 bytes of raw (non-structured) output
+                # — that's where stderr lines and CLI error messages live in
+                # the merged stdout/stderr stream after `is_noise` filtering.
+                raw_chunks = []
+                total = 0
+                for item in reversed(agent.output_buffer):
+                    if not isinstance(item, dict):
+                        continue
+                    # Skip events that already became structured transcript
+                    # entries — we want the unstructured residue.
+                    if item.get("parsed"):
+                        continue
+                    data = item.get("data")
+                    if isinstance(data, str) and data.strip():
+                        raw_chunks.append(data)
+                        total += len(data)
+                        if total > 800:
+                            break
+                raw_tail = "\n".join(reversed(raw_chunks))[-500:].strip()
+
+                diag_parts = [f"[cli_exit] cli={provider.name} code={agent.exit_code}"]
+                if exit_failed:
+                    diag_parts.append("process exited with non-zero status")
+                if not final_text:
+                    diag_parts.append("no assistant message was produced")
+                else:
+                    diag_parts.append("partial response received:")
+                    diag_parts.append(final_text)
+                if raw_tail:
+                    diag_parts.append(f"last raw output:\n{raw_tail}")
+
+                self._post_transcript_entries(
+                    agent,
+                    [{
+                        "role": "assistant",
+                        "kind": "text",
+                        "content": "\n\n".join(diag_parts),
+                    }],
                 )
         except Exception as exc:
             print(f"[LocalAgent] final flush to cerver failed: {exc}")

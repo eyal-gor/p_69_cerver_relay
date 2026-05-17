@@ -448,10 +448,15 @@ class CodexProvider(CliProvider):
         prompt_file = self._write_prompt_file(prompt, system_prompt)
         import tempfile
         out_file = tempfile.mktemp(suffix='.txt', prefix='codex-out-')
+        # Discard codex's verbose stdout (it duplicates the -o file) but
+        # keep stderr flowing — when codex fails (bad model, expired auth,
+        # rate limit), the only useful diagnostic lives in stderr. Letting
+        # it through means the agent_manager's exit-time diagnostic can
+        # surface the real error instead of an empty output file.
         return CliCommand(
             args=[
                 "bash", "-c",
-                f"cat '{prompt_file}' | codex exec - --dangerously-bypass-approvals-and-sandbox -o '{out_file}' > /dev/null 2>&1; cat '{out_file}'; rm -f '{prompt_file}' '{out_file}'"
+                f"cat '{prompt_file}' | codex exec - --dangerously-bypass-approvals-and-sandbox -o '{out_file}' > /dev/null; cat '{out_file}'; rm -f '{prompt_file}' '{out_file}'"
             ],
             env_overrides={},
             env_inject=self.get_auth_env(),
