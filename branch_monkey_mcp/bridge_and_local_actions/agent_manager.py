@@ -539,11 +539,12 @@ class LocalAgentManager:
         #      produced (CLI completed without ever emitting an
         #      agent_message). Same diagnostic shape as (2).
         #
-        # In ALL failure cases the diagnostic is pushed as a role=assistant
-        # entry so the cerver CLI's WaitForReply terminates immediately
-        # with a visible error, instead of polling for 3 minutes and
-        # returning "no reply within 3m0s" — silent failure is the worst
-        # failure.
+        # In true failure cases the diagnostic is pushed as a role=assistant
+        # entry so the cerver CLI's WaitForReply terminates immediately with
+        # a visible error. Codex emits an empty `turn.completed`/result event;
+        # extract_result_from_output_buffer intentionally ignores that empty
+        # result and falls back to prior assistant text so we don't append a
+        # bogus "[cli_exit] ... no assistant message" after a valid answer.
         try:
             final_text = self._extract_result(agent)
             exit_failed = bool(agent.exit_code and agent.exit_code != 0)
@@ -623,6 +624,13 @@ class LocalAgentManager:
             }
             await broadcast_to_agent_listeners(agent, paused_event)
             self._publish_stream_to_cerver(agent, paused_event)
+            asyncio.create_task(
+                self._push_cerver_status(
+                    agent,
+                    "idle" if agent.exit_code == 0 else "failed",
+                    f"agent paused after exit={agent.exit_code}",
+                )
+            )
         else:
             agent.status = "completed" if agent.exit_code == 0 else "failed"
 
@@ -1240,12 +1248,12 @@ class LocalAgentManager:
             agent, [{"role": "user", "kind": "text", "content": content}]
         )
 
-    async def _fire_callback(self, agent: LocalAgent) -> None:
-        """Push transcript + status to cerver for cron-triggered agents.
+    async def _push_cerver_status(self, agent: LocalAgent, status: str, end_reason: str) -> None:
+        """Push a lifecycle status to the linked cerver session.
 
         Callback config is expected to include cerver_url + cerver_api_token
-        + cerver_session_id (Kompany sets these when scheduling the run).
-        Falls back to nothing — no more Kompany /api/crons/callback hop.
+        + cerver_session_id. Transcript entries are pushed separately; this
+        method is only the run-state edge (`running` -> `idle/completed/failed`).
         """
         import httpx
 
@@ -1257,19 +1265,14 @@ class LocalAgentManager:
         cerver_token = callback.get("cerver_api_token")
         cerver_session_id = callback.get("cerver_session_id")
         if not (cerver_url and cerver_token and cerver_session_id):
-            print(f"[LocalAgent] _fire_callback: missing cerver fields for {agent.task_title}; skipping")
+            print(f"[LocalAgent] _push_cerver_status: missing cerver fields for {agent.task_title}; skipping")
             return
-
-        # Per-event transcript pushes happen in _push_event_to_cerver during
-        # the run, so this callback only updates the lifecycle status.
-        status = agent.status
-        cerver_status = "completed" if status in ("completed", "paused") else "failed"
 
         try:
             async with httpx.AsyncClient(timeout=15) as client:
                 status_resp = await client.post(
                     f"{cerver_url.rstrip('/')}/v2/sessions/{cerver_session_id}/status",
-                    json={"status": cerver_status, "end_reason": f"agent {status}"},
+                    json={"status": status, "end_reason": end_reason},
                     headers={
                         "Authorization": f"Bearer {cerver_token}",
                         "Content-Type": "application/json",
@@ -1278,6 +1281,17 @@ class LocalAgentManager:
                 print(f"[LocalAgent] cerver status for {agent.task_title}: {status_resp.status_code}")
         except Exception as e:
             print(f"[LocalAgent] cerver status push failed for {agent.task_title}: {e}")
+
+    async def _fire_callback(self, agent: LocalAgent) -> None:
+        """Push transcript + status to cerver for cron-triggered agents.
+
+        Callback config is expected to include cerver_url + cerver_api_token
+        + cerver_session_id (Kompany sets these when scheduling the run).
+        Falls back to nothing — no more Kompany /api/crons/callback hop.
+        """
+        status = agent.status
+        cerver_status = "completed" if status in ("completed", "paused") else "failed"
+        await self._push_cerver_status(agent, cerver_status, f"agent {status}")
 
     async def _run_with_resume(self, agent: LocalAgent, message: str, image_paths: List[str] = None) -> None:
         """Run a follow-up message using session resume.

@@ -100,7 +100,9 @@ def extract_result_from_output_buffer(output_buffer: list) -> str:
         if not parsed:
             continue
         if parsed.get("type") == "result":
-            return parsed.get("result", "")
+            result = parsed.get("result", "")
+            if isinstance(result, str) and result.strip():
+                return result
 
     text_parts = []
     for item in output_buffer:

@@ -29,6 +29,9 @@ sys.path.insert(0, str(_REPO))
 from branch_monkey_mcp.bridge_and_local_actions.agent_manager import (  # noqa: E402
     LocalAgentManager,
 )
+from branch_monkey_mcp.computer_runtime.execution import (  # noqa: E402
+    extract_result_from_output_buffer,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -284,3 +287,21 @@ def test_post_transcript_dedups_across_all_callers():
     assert len(agent._pushed_signatures) == 2
     # Two duplicate attempts skipped (caller C and D).
     assert agent._push_stats["dedup_skipped"] == 2
+
+
+def test_codex_empty_turn_completed_falls_back_to_assistant_text():
+    """Codex normalizes turn.completed to type=result with result="".
+    That empty result must not mask the real assistant text emitted earlier,
+    or final flush appends a bogus "[cli_exit] no assistant message" entry.
+    """
+    output_buffer = [
+        {
+            "parsed": {
+                "type": "assistant",
+                "message": {"content": [{"type": "text", "text": "real answer"}]},
+            }
+        },
+        {"parsed": {"type": "result", "result": "", "usage": {"turns": 1}}},
+    ]
+
+    assert extract_result_from_output_buffer(output_buffer) == "real answer"
