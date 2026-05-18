@@ -42,8 +42,6 @@ def build_process_env(cli_cmd, extra_env: Optional[dict] = None) -> dict:
     through from kompany or cerver session metadata).
     """
     env = os.environ.copy()
-    for key in cli_cmd.env_overrides:
-        env.pop(key, None)
 
     # Always remove CLAUDECODE to allow nested launches.
     env.pop("CLAUDECODE", None)
@@ -61,6 +59,22 @@ def build_process_env(cli_cmd, extra_env: Optional[dict] = None) -> dict:
 
     if extra_env:
         env.update(extra_env)
+
+    # Apply env_overrides LAST. Popping these early (before Infisical) let
+    # Infisical's vault silently re-add a key the provider had explicitly
+    # said "remove" — most painfully, CodexProvider strips OPENAI_API_KEY
+    # for subscription mode, but Infisical's OPENAI_API_KEY would re-land
+    # and force _finalize_codex_env to materialize a tmp api-mode
+    # CODEX_HOME with mismatched auth, making codex exit 1 silently.
+    #
+    # extra_env (per-call caller intent) still wins: if the caller
+    # explicitly set a key that the provider wants stripped, respect the
+    # caller — they know what they're doing.
+    if cli_cmd.env_overrides:
+        for key in cli_cmd.env_overrides:
+            if extra_env and key in extra_env:
+                continue
+            env.pop(key, None)
 
     # Final-pass hook: providers that need to react to the *merged* env
     # (e.g. CodexProvider materializing a temp CODEX_HOME when the
