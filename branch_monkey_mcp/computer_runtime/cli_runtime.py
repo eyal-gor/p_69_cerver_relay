@@ -62,6 +62,17 @@ def build_process_env(cli_cmd, extra_env: Optional[dict] = None) -> dict:
     if extra_env:
         env.update(extra_env)
 
+    # Final-pass hook: providers that need to react to the *merged* env
+    # (e.g. CodexProvider materializing a temp CODEX_HOME when the
+    # extra_env layer just added OPENAI_API_KEY but codex's auth.json
+    # still has OAuth tokens) wire it through cli_cmd.env_finalize.
+    finalize = getattr(cli_cmd, "env_finalize", None)
+    if callable(finalize):
+        try:
+            env = finalize(env) or env
+        except Exception as exc:
+            print(f"[cli_runtime] env_finalize failed: {exc}")
+
     return env
 
 

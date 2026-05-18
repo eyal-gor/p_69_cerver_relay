@@ -9,9 +9,9 @@ import json
 import os
 import shutil
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional
 
 
 @dataclass
@@ -20,6 +20,14 @@ class CliCommand:
     args: List[str]
     env_overrides: Dict[str, None]  # Keys to remove from env
     env_inject: Dict[str, str] = None  # Keys to add/set in env
+    # Optional post-merge env hook. Runs AFTER os.environ + Infisical +
+    # env_inject + extra_env have been merged, so the callable sees the
+    # final env that's about to be handed to the subprocess. Returns a
+    # (possibly new) dict. Used by CodexProvider to materialize a temp
+    # CODEX_HOME when OPENAI_API_KEY is present but auth.json has OAuth.
+    env_finalize: Optional[Callable[[Dict[str, str]], Dict[str, str]]] = field(
+        default=None, repr=False, compare=False
+    )
 
     def __post_init__(self):
         if self.env_inject is None:
@@ -70,14 +78,39 @@ class CliProvider:
     def get_auth_env(self) -> Dict[str, str]:
         """Return env vars to inject for authentication.
 
-        Checks: 1) API key in ~/.kompany/config.json, 2) API key in env.
-        Returns dict of env vars to set when spawning the CLI process.
+        Resolution order for the API key:
+          1. `~/.kompany/config.json` (TUI-stored key, machine-local)
+          2. Infisical cache (synced from the user's own vault at relay
+             startup — same source the spawned CLI would see in its env)
+          3. Host process env (`os.environ`)
+
+        Returning {} means env_inject leaves the env's existing
+        `<api_key_env>` untouched. That used to be fine but causes a
+        cross-vendor leak for proxy providers (grok runs claude → xAI
+        with ANTHROPIC_API_KEY=<xai-key>; without a key here, claude
+        ships Infisical's real Anthropic key to xAI and gets a 400).
+        Checking Infisical + env recovers the right key when only the
+        TUI hasn't been used on this machine.
         """
-        if self.api_key_config:
-            config = _load_config()
-            stored_key = config.get(self.api_key_config)
-            if stored_key:
-                return {self.api_key_env: stored_key}
+        if not self.api_key_config:
+            return {}
+        config = _load_config()
+        stored_key = config.get(self.api_key_config)
+        if stored_key:
+            return {self.api_key_env: stored_key}
+
+        try:
+            from ..infisical_client import get_secrets_sync
+            secrets = get_secrets_sync()
+            vault_key = secrets.get(self.api_key_env)
+            if vault_key:
+                return {self.api_key_env: vault_key}
+        except Exception:
+            pass
+
+        env_key = os.environ.get(self.api_key_env)
+        if env_key:
+            return {self.api_key_env: env_key}
         return {}
 
     def set_api_key(self, key: str):
@@ -338,8 +371,115 @@ class CodexProvider(CliProvider):
     api_key_env = "OPENAI_API_KEY"
     api_key_config = "openai_api_key"
 
+    # Cached `codex login status` result for the relay's lifetime — the
+    # check shells out and adds ~150ms to every spawn otherwise.
+    _subscription_cache: Optional[bool] = None
+
     def is_available(self) -> Optional[str]:
         return shutil.which("codex")
+
+    def _has_subscription(self) -> bool:
+        """True iff `codex login status` reports a signed-in OAuth session.
+
+        Cached for the relay's lifetime — re-login is rare and the worst
+        case (stale True) lets codex itself surface the auth error.
+        """
+        if CodexProvider._subscription_cache is not None:
+            return CodexProvider._subscription_cache
+        if not self.is_available():
+            CodexProvider._subscription_cache = False
+            return False
+        try:
+            result = subprocess.run(
+                ["codex", "login", "status"],
+                capture_output=True, text=True, timeout=4,
+            )
+            CodexProvider._subscription_cache = result.returncode == 0
+        except Exception:
+            CodexProvider._subscription_cache = False
+        return CodexProvider._subscription_cache
+
+    def get_auth_env(self) -> Dict[str, str]:
+        """Resolve codex auth env.
+
+        Subscription wins over a stored api key — injecting OPENAI_API_KEY
+        forces codex into per-token billing even when the user has
+        ChatGPT Plus/Pro signed in. That used to silently fail (and bill
+        the api key) on `cerver compare` runs where the user expected
+        subscription mode. If the user explicitly wants api mode they
+        can pass `--bill api`, which flows the key in via `extra_env`
+        (highest precedence) and overrides codex's OAuth resolution.
+        """
+        if self._has_subscription():
+            return {}
+        return super().get_auth_env()
+
+    def _build_env_overrides(self) -> Dict[str, None]:
+        """Strip an inherited OPENAI_API_KEY when subscription is active.
+
+        Without this, a key sitting in Infisical or the host shell would
+        force codex into api mode despite an active `codex login`. Strip
+        leaves codex to resolve its own OAuth. `cerver run --bill api`
+        re-injects the user-provided key via `extra_env` (highest
+        precedence), and `_finalize_codex_env` swaps in a synthetic
+        CODEX_HOME for that key so the api path actually fires.
+        """
+        if self._has_subscription():
+            return {"OPENAI_API_KEY": None}
+        return {}
+
+    def _finalize_codex_env(self, env: Dict[str, str]) -> Dict[str, str]:
+        """Force codex into api-key mode when a key is present.
+
+        Codex CLI's `~/.codex/auth.json` holds both an OAuth pair and an
+        api key, and `auth_mode = "chatgpt"` makes it always prefer OAuth
+        — `OPENAI_API_KEY` env var is silently ignored. The only way to
+        flip auth_mode for a single spawn is to redirect `CODEX_HOME` at
+        a directory whose auth.json has just the api key. We materialize
+        that dir on demand, symlinking session/cache state out of the
+        user's real codex home so prior context survives.
+        """
+        api_key = env.get("OPENAI_API_KEY")
+        if not api_key:
+            return env
+        # Already overridden — caller knows what they're doing.
+        if env.get("CODEX_HOME"):
+            return env
+
+        real_home = Path(os.path.expanduser("~/.codex"))
+        # Subscription user with no api key intent: respect OAuth.
+        if not real_home.exists():
+            return env
+
+        try:
+            import tempfile
+            tmp_home = Path(tempfile.mkdtemp(prefix="codex-api-"))
+            # Symlink the bulky / stateful subdirs so we don't lose
+            # sessions, memories, plugins, etc.
+            for sub in ("sessions", "memories", "plugins", "cache",
+                        "rules", "ambient-suggestions", "browser",
+                        "computer-use"):
+                src = real_home / sub
+                if src.exists():
+                    try:
+                        os.symlink(src, tmp_home / sub)
+                    except FileExistsError:
+                        pass
+            # Copy config.toml as-is (the projects.<dir>.trust_level
+            # entries are what avoid an interactive trust prompt).
+            real_cfg = real_home / "config.toml"
+            if real_cfg.exists():
+                import shutil as _shutil
+                _shutil.copyfile(real_cfg, tmp_home / "config.toml")
+            # API-only auth.json — no `tokens` block means OAuth path
+            # is skipped and codex reports "Logged in using an API key".
+            (tmp_home / "auth.json").write_text(json.dumps({
+                "OPENAI_API_KEY": api_key,
+            }))
+            env = {**env, "CODEX_HOME": str(tmp_home)}
+        except Exception as exc:
+            print(f"[CodexProvider] failed to materialize api-mode CODEX_HOME: {exc}")
+        return env
 
     def set_api_key(self, key: str):
         """Store API key in our config AND register with `codex login --with-api-key`."""
@@ -458,8 +598,9 @@ class CodexProvider(CliProvider):
                 "bash", "-c",
                 f"cat '{prompt_file}' | codex exec - --dangerously-bypass-approvals-and-sandbox -o '{out_file}' > /dev/null; cat '{out_file}'; rm -f '{prompt_file}' '{out_file}'"
             ],
-            env_overrides={},
+            env_overrides=self._build_env_overrides(),
             env_inject=self.get_auth_env(),
+            env_finalize=self._finalize_codex_env,
         )
 
     def build_run_command(self, prompt, system_prompt=None, model=None):
@@ -473,8 +614,9 @@ class CodexProvider(CliProvider):
                 "bash", "-c",
                 f"cat '{prompt_file}' | codex{model_arg} exec - --dangerously-bypass-approvals-and-sandbox --json; rm -f '{prompt_file}'"
             ],
-            env_overrides={},
+            env_overrides=self._build_env_overrides(),
             env_inject=self.get_auth_env(),
+            env_finalize=self._finalize_codex_env,
         )
 
     def build_resume_command(self, prompt, session_id):
@@ -486,8 +628,9 @@ class CodexProvider(CliProvider):
                 "--dangerously-bypass-approvals-and-sandbox",
                 "--json",
             ],
-            env_overrides={},
+            env_overrides=self._build_env_overrides(),
             env_inject=self.get_auth_env(),
+            env_finalize=self._finalize_codex_env,
         )
 
     def build_oneshot_command(self, prompt):
@@ -498,8 +641,9 @@ class CodexProvider(CliProvider):
                 "--dangerously-bypass-approvals-and-sandbox",
                 "--json",
             ],
-            env_overrides={},
+            env_overrides=self._build_env_overrides(),
             env_inject=self.get_auth_env(),
+            env_finalize=self._finalize_codex_env,
         )
 
     def normalize_event(self, raw_json):
@@ -725,9 +869,14 @@ class GrokProvider(CliProvider):
             args.extend(["--model", model])
         if system_prompt:
             args.extend(["--append-system-prompt", system_prompt])
+        # Always drop ANTHROPIC_API_KEY before injecting: if no xai-key
+        # was resolved, env_inject can't set it, and a real Anthropic key
+        # inherited from Infisical/host env would otherwise ship to xAI
+        # (which rejects it as "Incorrect API key provided: sk***XX").
+        # Better to land a clear auth error than masquerade as one.
         return CliCommand(
             args=args,
-            env_overrides={"CLAUDECODE": None},
+            env_overrides={"CLAUDECODE": None, "ANTHROPIC_API_KEY": None},
             env_inject={
                 "ANTHROPIC_BASE_URL": "https://api.x.ai",
                 **(auth_env if auth_env else {}),
@@ -747,9 +896,10 @@ class GrokProvider(CliProvider):
                 "--resume", session_id,
                 "--dangerously-skip-permissions"
             ],
-            env_overrides={"CLAUDECODE": None},
+            env_overrides={"CLAUDECODE": None, "ANTHROPIC_API_KEY": None},
             env_inject={
                 "ANTHROPIC_BASE_URL": "https://api.x.ai",
+                **(auth_env if auth_env else {}),
                 **({"ANTHROPIC_API_KEY": api_key} if api_key else {}),
             },
         )
@@ -764,9 +914,10 @@ class GrokProvider(CliProvider):
                 "--output-format", "json",
                 "--dangerously-skip-permissions"
             ],
-            env_overrides={"CLAUDECODE": None},
+            env_overrides={"CLAUDECODE": None, "ANTHROPIC_API_KEY": None},
             env_inject={
                 "ANTHROPIC_BASE_URL": "https://api.x.ai",
+                **(auth_env if auth_env else {}),
                 **({"ANTHROPIC_API_KEY": api_key} if api_key else {}),
             },
         )
