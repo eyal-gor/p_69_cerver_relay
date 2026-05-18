@@ -9,6 +9,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
@@ -863,11 +864,19 @@ class GrokProvider(CliProvider):
         return self._grok_cli_command(prompt, "text", auth_env, api_key, system_prompt)
 
     def _grok_cli_command(self, prompt, output_format, auth_env, api_key, system_prompt=None, model=None):
+        # Direct path to xAI — bypass the `claude` binary entirely. Routing
+        # grok through `claude -p` made grok inherit claude's own
+        # subscription rate limit: when the Anthropic Max quota was
+        # exhausted, the claude binary 400'd ("You have reached your
+        # specified API usage limits") before the HTTP call to xAI was
+        # even made. xai_runner.py speaks the same stream-json output
+        # the relay parser already consumes, but hits xAI directly so
+        # claude's quota state is irrelevant.
         args = [
-            "claude",
+            sys.executable, "-m",
+            "branch_monkey_mcp.bridge_and_local_actions.xai_runner",
             "-p", prompt,
             "--output-format", output_format,
-            "--dangerously-skip-permissions"
         ]
         if output_format == "stream-json":
             args.append("--verbose")
@@ -875,11 +884,9 @@ class GrokProvider(CliProvider):
             args.extend(["--model", model])
         if system_prompt:
             args.extend(["--append-system-prompt", system_prompt])
-        # Always drop ANTHROPIC_API_KEY before injecting: if no xai-key
-        # was resolved, env_inject can't set it, and a real Anthropic key
-        # inherited from Infisical/host env would otherwise ship to xAI
-        # (which rejects it as "Incorrect API key provided: sk***XX").
-        # Better to land a clear auth error than masquerade as one.
+        # Drop ANTHROPIC_API_KEY from inherited env so a stray Anthropic
+        # key can't land in the xai_runner's auth path. The runner picks
+        # ANTHROPIC_API_KEY (env_inject) first, then XAI_API_KEY.
         return CliCommand(
             args=args,
             env_overrides={"CLAUDECODE": None, "ANTHROPIC_API_KEY": None},
@@ -891,42 +898,20 @@ class GrokProvider(CliProvider):
         )
 
     def build_resume_command(self, prompt, session_id):
+        # xai_runner is stateless w.r.t. session_id — chat-style resume is a
+        # cerver-level concern (the relay re-feeds prior transcript on each
+        # turn). Behave the same as a fresh run for now; the model only sees
+        # the current prompt, which mirrors the pre-existing claude-binary
+        # behavior since `--resume` doesn't restore conversational state at
+        # xAI either (xAI is stateless).
         auth_env = self.get_auth_env()
         api_key = auth_env.get(self.api_key_env)
-        return CliCommand(
-            args=[
-                "claude",
-                "-p", prompt,
-                "--output-format", "stream-json",
-                "--verbose",
-                "--resume", session_id,
-                "--dangerously-skip-permissions"
-            ],
-            env_overrides={"CLAUDECODE": None, "ANTHROPIC_API_KEY": None},
-            env_inject={
-                "ANTHROPIC_BASE_URL": "https://api.x.ai",
-                **(auth_env if auth_env else {}),
-                **({"ANTHROPIC_API_KEY": api_key} if api_key else {}),
-            },
-        )
+        return self._grok_cli_command(prompt, "stream-json", auth_env, api_key)
 
     def build_oneshot_command(self, prompt):
         auth_env = self.get_auth_env()
         api_key = auth_env.get(self.api_key_env)
-        return CliCommand(
-            args=[
-                "claude",
-                "-p", prompt,
-                "--output-format", "json",
-                "--dangerously-skip-permissions"
-            ],
-            env_overrides={"CLAUDECODE": None, "ANTHROPIC_API_KEY": None},
-            env_inject={
-                "ANTHROPIC_BASE_URL": "https://api.x.ai",
-                **(auth_env if auth_env else {}),
-                **({"ANTHROPIC_API_KEY": api_key} if api_key else {}),
-            },
-        )
+        return self._grok_cli_command(prompt, "json", auth_env, api_key)
 
     def extract_session_id(self, event):
         # Same as Claude — grok uses claude under the hood
