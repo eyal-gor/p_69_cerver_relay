@@ -108,7 +108,12 @@ class RelayTUI:
         }
         self._stdout_capture = LogCapture(sys.stdout)
         self._stderr_capture = LogCapture(sys.stderr)
-        self._view = "dashboard"
+        # Main view tabs: "connect" (identity + transport + setup) and
+        # "runtime" (workload + compute resources). [I]nstalled and
+        # [L]ogs are sub-views; pressing them again returns to whichever
+        # main view was last active — tracked in _last_main_view.
+        self._view = "connect"
+        self._last_main_view = "connect"
         self._running = True
         self._stop_callback: Optional[Callable] = None
         self._scroll_offset = 0
@@ -225,14 +230,16 @@ class RelayTUI:
         while self._running:
             now = time.monotonic()
             # Dashboard with animation needs faster redraws; other views use REFRESH_MS
-            interval = ANIM_INTERVAL if self._view == "dashboard" else self.REFRESH_MS / 1000.0
+            interval = ANIM_INTERVAL if self._view in ("connect", "runtime") else self.REFRESH_MS / 1000.0
             if now - last_draw >= interval:
                 self._anim_frame += 1
                 try:
                     stdscr.erase()
                     h, w = stdscr.getmaxyx()
-                    if self._view == "dashboard":
-                        self._draw_dashboard(stdscr, h, w)
+                    if self._view == "connect":
+                        self._draw_connect(stdscr, h, w)
+                    elif self._view == "runtime":
+                        self._draw_runtime(stdscr, h, w)
                     elif self._view == "installed":
                         self._draw_installed(stdscr, h, w)
                     else:
@@ -346,44 +353,58 @@ class RelayTUI:
             self._running = False
         elif key == ord("l") or key == ord("L"):
             if self._view == "logs":
-                self._view = "dashboard"
+                self._view = self._last_main_view
             else:
+                if self._view in ("connect", "runtime"):
+                    self._last_main_view = self._view
                 self._view = "logs"
                 self._scroll_offset = 0
         elif key == ord("i") or key == ord("I"):
-            # Toggle the installed-tools screen. From any non-dashboard
-            # view, [I] also routes back to dashboard via the else branch
-            # so the user can't get marooned.
+            # Toggle the installed-tools screen. Tracks the originating
+            # main view so [I] returns the user where they came from
+            # instead of always defaulting to Connect.
             if self._view == "installed":
-                self._view = "dashboard"
-            elif self._view == "dashboard":
+                self._view = self._last_main_view
+            elif self._view in ("connect", "runtime"):
+                self._last_main_view = self._view
                 self._view = "installed"
+        elif key == ord("1"):
+            # Direct nav: Connect tab. Also resets _last_main_view so
+            # [I]/[L] from a sub-view return here.
+            if self._view != "connect":
+                self._view = "connect"
+                self._last_main_view = "connect"
+        elif key == ord("2"):
+            # Direct nav: Runtime tab.
+            if self._view != "runtime":
+                self._view = "runtime"
+                self._last_main_view = "runtime"
         elif key == ord("n") or key == ord("N"):
-            if self._view == "dashboard":
+            if self._view == "connect":
                 self._editing_name = True
                 self._name_input = self.state.get("machine_name", "")
                 self._name_cursor = len(self._name_input)
                 if stdscr:
                     curses.curs_set(1)
         elif key == ord("h") or key == ord("H"):
-            if self._view == "dashboard":
+            if self._view == "connect":
                 self._editing_home = True
                 self._home_input = self.state.get("home_dir", "")
                 self._home_cursor = len(self._home_input)
                 if stdscr:
                     curses.curs_set(1)
         elif key == ord("v") or key == ord("V"):
-            if self._view in ("dashboard", "installed"):
+            if self._view in ("connect", "runtime", "installed"):
                 self._verbose = not self._verbose
         elif key == ord("s") or key == ord("S"):
-            if self._view == "dashboard" and self._on_launchd_install:
+            if self._view == "connect" and self._on_launchd_install:
                 ld = self.state.get("launchd")
                 if ld in ("running", "installed"):
                     self._on_launchd_install(False)  # uninstall
                 else:
                     self._on_launchd_install(True)  # install
         elif key == ord("c") or key == ord("C"):
-            if self._view == "dashboard":
+            if self._view == "connect":
                 # Open CLI selection prompt
                 providers = self.state.get("cli_providers", {})
                 installed = [n for n, p in providers.items() if p.get("installed")]
@@ -391,7 +412,7 @@ class RelayTUI:
                 self._cli_selected = installed.index(current) if current in installed else 0
                 self.state["cli_prompt"] = "pending"
         elif key == ord("d") or key == ord("D"):
-            if self._view == "dashboard" and self._on_logout:
+            if self._view == "connect" and self._on_logout:
                 self._on_logout()
                 self._running = False
         elif key == curses.KEY_UP and self._view == "logs":
@@ -433,9 +454,15 @@ class RelayTUI:
     def _bold(self):
         return curses.A_BOLD
 
-    # ── dashboard view ───────────────────────────────────────────────
+    # ── connect view ─────────────────────────────────────────────────
+    # Identity (who am I), transport (am I reachable?), setup (install
+    # state of relay autostart + cerver CLI). Sibling view to Runtime,
+    # which covers workload/resource use. Both share the animated logo
+    # header. Modal overlays (auth, onboarding, launchd prompt, CLI
+    # selector) all surface here because Connect is the default landing
+    # view on startup and on logout.
 
-    def _draw_dashboard(self, stdscr, h, w):
+    def _draw_connect(self, stdscr, h, w):
         s = self.state
         col = 2
         lbl_col = 4
@@ -737,7 +764,69 @@ class RelayTUI:
         if self._verbose:
             self._put(stdscr, y, val_col, "cerver run / compare / login (~/.cerver/bin/cerver)", self._dim())
             y += 1
+
+        # Reconnects — moved from the old WORKLOAD block. Belongs to
+        # Connect because it's a transport-stability metric, not a
+        # measure of how much work the relay is doing.
+        rc = s.get("reconnect_count", 0)
+        self._put(stdscr, y, lbl_col, "Reconnects", self._dim())
+        self._put(stdscr, y, val_col, str(rc), self._green() if rc == 0 else self._yellow())
         y += 1
+
+        # Footer — tab nav first, then connect-specific actions.
+        if not self._editing_home:
+            curses.curs_set(0)
+        self._draw_tab_footer(stdscr, h, w, col, lbl_col, bar_w, current="connect")
+
+    # ── runtime view ─────────────────────────────────────────────────
+    # Workload (agents, workflows, requests) and the underlying compute
+    # resources (CPU / memory / load / disk). Sibling of Connect; shares
+    # the same animated header but skips identity/setup since those are
+    # static during a session.
+
+    def _draw_runtime(self, stdscr, h, w):
+        s = self.state
+        col = 2
+        lbl_col = 4
+        val_col = 20
+        bar_w = min(50, w - 4)
+        y = 1
+
+        # Header — same logo treatment as Connect so the user always
+        # knows they're inside the relay TUI, regardless of which tab.
+        ver = f"v{s['version']}" if s["version"] else ""
+        if w >= LOGO_WIDTH + 6:
+            self._draw_animated_logo(stdscr, y, col)
+            y += LOGO_HEIGHT
+            subtitle = f"cerver relay {ver}".rstrip()
+            self._put(stdscr, y, col + LOGO_WIDTH - len(subtitle), subtitle, self._dim())
+            y += 1
+            self._hline(stdscr, y, col, bar_w)
+            y += 2
+        else:
+            self._put(stdscr, y, col, "cerver", self._bold() | self._green())
+            self._put(stdscr, y, col + 7, "·", self._dim())
+            self._put(stdscr, y, col + 9, "relay", self._dim())
+            y += 1
+            if ver:
+                self._put(stdscr, y, col, ver, self._dim())
+                y += 1
+            self._hline(stdscr, y, col, bar_w)
+            y += 2
+
+        # Identity-lite — just enough to confirm which compute you're
+        # looking at without duplicating the full block from Connect.
+        if s.get("machine_name"):
+            self._put(stdscr, y, lbl_col, "Machine", self._dim())
+            self._put(stdscr, y, val_col, s["machine_name"], self._bold())
+            y += 1
+        providers = s.get("cli_providers", {})
+        default_cli = s.get("default_cli", "claude")
+        default_provider = providers.get(default_cli, {})
+        cli_display = default_provider.get("display_name", default_cli.title())
+        self._put(stdscr, y, lbl_col, "AI CLI", self._dim())
+        self._put(stdscr, y, val_col, cli_display, self._bold())
+        y += 2
 
         # Workload
         self._put(stdscr, y, lbl_col, "WORKLOAD", self._dim())
@@ -767,11 +856,6 @@ class RelayTUI:
 
         self._put(stdscr, y, lbl_col, "Uptime", self._dim())
         self._put(stdscr, y, val_col, self._format_uptime())
-        y += 1
-
-        rc = s.get("reconnect_count", 0)
-        self._put(stdscr, y, lbl_col, "Reconnects", self._dim())
-        self._put(stdscr, y, val_col, str(rc), self._green() if rc == 0 else self._yellow())
         y += 1
 
         self._put(stdscr, y, lbl_col, "Requests", self._dim())
@@ -821,38 +905,66 @@ class RelayTUI:
             self._put(stdscr, y, lbl_col, line[:bar_w], self._dim())
             y += 1
 
-        # Footer
-        if not self._editing_home:
-            curses.curs_set(0)
+        self._draw_tab_footer(stdscr, h, w, col, lbl_col, bar_w, current="runtime")
+
+    # ── shared tab footer ────────────────────────────────────────────
+    # Pulled into a helper so both Connect and Runtime show the same
+    # navigation strip with a ● on the active tab. Connect-specific
+    # action keys ([N]/[H]/[S]/[C]/[D]) are appended only when current
+    # == "connect" since those handlers ignore other views anyway.
+
+    def _draw_tab_footer(self, stdscr, h, w, col, lbl_col, bar_w, current):
         footer_y = h - 2
         self._hline(stdscr, footer_y - 1, col, bar_w)
         x = lbl_col
-        self._put(stdscr, footer_y, x, "[L]", self._cyan() | self._bold())
-        self._put(stdscr, footer_y, x + 4, "oLogs", self._dim())
-        x += 11
-        self._put(stdscr, footer_y, x, "[N]", self._cyan() | self._bold())
-        self._put(stdscr, footer_y, x + 4, "Name", self._dim())
-        x += 10
-        self._put(stdscr, footer_y, x, "[H]", self._cyan() | self._bold())
-        self._put(stdscr, footer_y, x + 4, "Home", self._dim())
-        x += 10
-        self._put(stdscr, footer_y, x, "[S]", self._cyan() | self._bold())
-        ld = self.state.get("launchd")
-        s_label = "Uninstall" if ld in ("running", "installed") else "Startup"
-        self._put(stdscr, footer_y, x + 4, s_label, self._dim())
-        x += 4 + len(s_label) + 2
-        self._put(stdscr, footer_y, x, "[C]", self._cyan() | self._bold())
-        self._put(stdscr, footer_y, x + 4, "CLI", self._dim())
-        x += 9
+
+        # Tab nav: [1] Connect, [2] Runtime — ● marks the active one.
+        active_dot = "●"
+        self._put(stdscr, footer_y, x, "[1]", self._cyan() | self._bold())
+        label = f"{active_dot} Connect" if current == "connect" else "Connect"
+        attr = self._bold() if current == "connect" else self._dim()
+        self._put(stdscr, footer_y, x + 4, label, attr)
+        x += 4 + len(label) + 2
+
+        self._put(stdscr, footer_y, x, "[2]", self._cyan() | self._bold())
+        label = f"{active_dot} Runtime" if current == "runtime" else "Runtime"
+        attr = self._bold() if current == "runtime" else self._dim()
+        self._put(stdscr, footer_y, x + 4, label, attr)
+        x += 4 + len(label) + 2
+
         self._put(stdscr, footer_y, x, "[I]", self._cyan() | self._bold())
         self._put(stdscr, footer_y, x + 4, "Installed", self._dim())
         x += 15
+
+        self._put(stdscr, footer_y, x, "[L]", self._cyan() | self._bold())
+        self._put(stdscr, footer_y, x + 4, "Logs", self._dim())
+        x += 10
+
         self._put(stdscr, footer_y, x, "[V]", self._cyan() | self._bold())
         self._put(stdscr, footer_y, x + 4, "Verbose", self._dim())
         x += 13
-        self._put(stdscr, footer_y, x, "[D]", self._cyan() | self._bold())
-        self._put(stdscr, footer_y, x + 4, "Logout", self._dim())
-        x += 12
+
+        if current == "connect":
+            # Identity edits + setup actions only apply on the Connect
+            # tab — their handlers gate on _view == "connect".
+            self._put(stdscr, footer_y, x, "[N]", self._cyan() | self._bold())
+            self._put(stdscr, footer_y, x + 4, "Name", self._dim())
+            x += 10
+            self._put(stdscr, footer_y, x, "[H]", self._cyan() | self._bold())
+            self._put(stdscr, footer_y, x + 4, "Home", self._dim())
+            x += 10
+            self._put(stdscr, footer_y, x, "[S]", self._cyan() | self._bold())
+            ld = self.state.get("launchd")
+            s_label = "Uninstall" if ld in ("running", "installed") else "Startup"
+            self._put(stdscr, footer_y, x + 4, s_label, self._dim())
+            x += 4 + len(s_label) + 2
+            self._put(stdscr, footer_y, x, "[C]", self._cyan() | self._bold())
+            self._put(stdscr, footer_y, x + 4, "CLI", self._dim())
+            x += 9
+            self._put(stdscr, footer_y, x, "[D]", self._cyan() | self._bold())
+            self._put(stdscr, footer_y, x + 4, "Logout", self._dim())
+            x += 12
+
         self._put(stdscr, footer_y, x, "[Q]", self._cyan() | self._bold())
         self._put(stdscr, footer_y, x + 4, "Quit", self._dim())
 
@@ -1465,10 +1577,17 @@ class RelayTUI:
                         self._put(stdscr, y, path_col, hint[: max(0, w - path_col - 2)], self._dim())
                 y += 1
 
-        # Footer
+        # Footer — direct nav back to either main tab so the user
+        # doesn't have to remember which one they came from.
         footer_y = h - 2
         self._hline(stdscr, footer_y - 1, col, bar_w)
         x = lbl_col
+        self._put(stdscr, footer_y, x, "[1]", self._cyan() | self._bold())
+        self._put(stdscr, footer_y, x + 4, "Connect", self._dim())
+        x += 13
+        self._put(stdscr, footer_y, x, "[2]", self._cyan() | self._bold())
+        self._put(stdscr, footer_y, x + 4, "Runtime", self._dim())
+        x += 13
         self._put(stdscr, footer_y, x, "[I]", self._cyan() | self._bold())
         self._put(stdscr, footer_y, x + 4, "Back", self._dim())
         x += 11
