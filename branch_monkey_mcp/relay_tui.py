@@ -230,7 +230,8 @@ class RelayTUI:
 
         while self._running:
             now = time.monotonic()
-            # Dashboard with animation needs faster redraws; other views use REFRESH_MS
+            # Animated logo wants 10fps redraws on tabs that show it;
+            # Help is static so it falls back to the slower REFRESH_MS.
             interval = ANIM_INTERVAL if self._view in ("connect", "runtime") else self.REFRESH_MS / 1000.0
             if now - last_draw >= interval:
                 self._anim_frame += 1
@@ -241,6 +242,8 @@ class RelayTUI:
                         self._draw_connect(stdscr, h, w)
                     elif self._view == "runtime":
                         self._draw_runtime(stdscr, h, w)
+                    elif self._view == "help":
+                        self._draw_help(stdscr, h, w)
                     else:
                         self._draw_logs(stdscr, h, w)
                     stdscr.refresh()
@@ -354,13 +357,13 @@ class RelayTUI:
             if self._view == "logs":
                 self._view = self._last_main_view
             else:
-                if self._view in ("connect", "runtime"):
+                if self._view in ("connect", "runtime", "help"):
                     self._last_main_view = self._view
                 self._view = "logs"
                 self._scroll_offset = 0
         elif key == ord("1"):
             # Direct nav: Connect tab. Also resets _last_main_view so
-            # [I]/[L] from a sub-view return here.
+            # [L] from a sub-view returns here.
             if self._view != "connect":
                 self._view = "connect"
                 self._last_main_view = "connect"
@@ -369,6 +372,12 @@ class RelayTUI:
             if self._view != "runtime":
                 self._view = "runtime"
                 self._last_main_view = "runtime"
+        elif key == ord("3"):
+            # Direct nav: Help tab. Static reference page — no live
+            # state, so refresh interval falls back to slow.
+            if self._view != "help":
+                self._view = "help"
+                self._last_main_view = "help"
         elif key == ord("n") or key == ord("N"):
             if self._view == "connect":
                 self._editing_name = True
@@ -409,11 +418,12 @@ class RelayTUI:
             self._scroll_offset += 1
         elif key == curses.KEY_DOWN and self._view == "logs":
             self._scroll_offset = max(0, self._scroll_offset - 1)
-        elif key in (curses.KEY_LEFT, curses.KEY_RIGHT) and self._view in ("connect", "runtime"):
-            # ←/→ cycle between the two main tabs. Same effect either
-            # direction since there are only two tabs; if a third lands
-            # later we can split into prev/next.
-            self._view = "runtime" if self._view == "connect" else "connect"
+        elif key in (curses.KEY_LEFT, curses.KEY_RIGHT) and self._view in ("connect", "runtime", "help"):
+            # ←/→ cycles forward/backward through the three main tabs.
+            order = ["connect", "runtime", "help"]
+            i = order.index(self._view)
+            step = -1 if key == curses.KEY_LEFT else 1
+            self._view = order[(i + step) % len(order)]
             self._last_main_view = self._view
 
     # ── drawing helpers ──────────────────────────────────────────────
@@ -961,11 +971,121 @@ class RelayTUI:
 
         self._draw_tab_footer(stdscr, h, w, col, lbl_col, bar_w, current="runtime")
 
+    # ── help view ────────────────────────────────────────────────────
+    # Static reference page: what cerver is wired to (Infisical),
+    # what the CLI verbs do (`run`, `compare`, `computes`, …), and
+    # the TUI keybindings that aren't already discoverable in the
+    # footer. Aimed at users who haven't read the docs — terse and
+    # action-oriented. Lives as a third main tab so it's reachable
+    # in two keystrokes from anywhere.
+
+    def _draw_help(self, stdscr, h, w):
+        s = self.state
+        col = 2
+        lbl_col = 4
+        bar_w = min(w - 4, 100)
+        y = 1
+
+        # Title row — same header treatment as Connect/Runtime so the
+        # tab swap is visually consistent. No animated logo here; this
+        # page is static and the logo eats vertical room help needs.
+        self._put(stdscr, y, col, "Cerver Help", self._bold())
+        ver = f"v{s['version']}" if s.get("version") else ""
+        if ver:
+            self._put(stdscr, y, col + bar_w - len(ver) - 2, ver, self._dim())
+        y += 1
+        self._hline(stdscr, y, col, bar_w)
+        y += 2
+
+        # ── Section helpers ─────────────────────────────────────
+        # Keep section rendering compact since the page is content-
+        # heavy and the terminal might be short. Each section: bold
+        # header, hline, dim body. Bail out if we run off the bottom.
+        cmd_col = lbl_col + 2
+        desc_col = cmd_col + 34   # widest cmd: `cerver compare --clis a,b,c "..."`
+
+        def section(title):
+            nonlocal y
+            if y >= h - 4:
+                return False
+            self._put(stdscr, y, lbl_col, title, self._dim() | self._bold())
+            y += 1
+            self._hline(stdscr, y, col, bar_w)
+            y += 1
+            return True
+
+        def row(cmd, desc):
+            nonlocal y
+            if y >= h - 3:
+                return
+            self._put(stdscr, y, cmd_col, cmd, self._bold())
+            if desc_col + len(desc) < w - 1:
+                self._put(stdscr, y, desc_col, desc, self._dim())
+            y += 1
+
+        def blank():
+            nonlocal y
+            y += 1
+
+        # ── Infisical ───────────────────────────────────────────
+        if section("INFISICAL — your secrets vault"):
+            row("infisical login", "browser OAuth, stores session in ~/.infisical")
+            row("infisical secrets", "list keys cerver will inject into agents")
+            row("infisical run -- cmd", "run any command with vault env vars injected")
+            blank()
+            self._put(stdscr, y, cmd_col, "Cerver wraps the relay with `infisical run` so spawned", self._dim())
+            y += 1
+            self._put(stdscr, y, cmd_col, "agents (claude/codex/grok) get your API keys at runtime.", self._dim())
+            y += 1
+            self._put(stdscr, y, cmd_col, "Skipped Infisical? Relay reads keys from process env.", self._dim())
+            y += 1
+            blank()
+
+        # ── Cerver CLI verbs ────────────────────────────────────
+        if section("CERVER — agent runs on any compute"):
+            row("cerver run \"<prompt>\"", "single agent on this machine")
+            row("cerver run --on <compute>", "pick a registered compute by name")
+            row("cerver run --cli codex", "claude (default), codex, or grok")
+            row("cerver run --bill api", "bill via API keys instead of subscription")
+            blank()
+            row("cerver compare \"<prompt>\"", "claude + codex side-by-side")
+            row("cerver compare --clis claude,codex,grok \"…\"", "three-way (needs vault)")
+            blank()
+            row("cerver computes", "list your registered computes")
+            row("cerver sessions", "recent agent sessions")
+            row("cerver move <session> <compute>", "migrate a live session")
+            row("cerver login", "re-bootstrap auth (and Infisical)")
+            blank()
+
+        # ── TUI keybindings ─────────────────────────────────────
+        if section("KEYBINDINGS"):
+            row("[1] / [2] / [3]", "Connect / Runtime / Help")
+            row("← / →", "cycle tabs")
+            row("[L]", "logs (toggle)")
+            row("[V]", "verbose mode on this tab")
+            row("[Q]", "quit")
+            blank()
+            row("Connect only:", "")
+            row("  [N] / [H]", "edit machine name / home dir")
+            row("  [S]", "install/uninstall launchd autostart")
+            row("  [C]", "pick default AI CLI")
+            row("  [D]", "logout")
+            blank()
+
+        # ── Links ───────────────────────────────────────────────
+        if section("LINKS"):
+            row("docs", "https://cerver.ai/docs")
+            row("dashboard", s.get("dashboard_url") or "http://localhost:18081/")
+            row("infisical", "https://app.infisical.com")
+
+        self._draw_tab_footer(stdscr, h, w, col, lbl_col, bar_w, current="help")
+
     # ── shared tab footer ────────────────────────────────────────────
-    # Pulled into a helper so both Connect and Runtime show the same
-    # navigation strip with a ● on the active tab. Connect-specific
-    # action keys ([N]/[H]/[S]/[C]/[D]) are appended only when current
-    # == "connect" since those handlers ignore other views anyway.
+    # Pulled into a helper so all three main tabs show the same
+    # navigation strip with a bracket+green on the active tab.
+    # Connect-specific action keys ([N]/[H]/[S]/[C]/[D]) are appended
+    # only when current == "connect" since those handlers ignore other
+    # views anyway.
 
     def _draw_tab_footer(self, stdscr, h, w, col, lbl_col, bar_w, current):
         footer_y = h - 2
@@ -975,7 +1095,7 @@ class RelayTUI:
         # Tab nav. Active tab is bracketed and green-bold so it pops at
         # a glance; inactive tabs are dim. ←→ also cycle between tabs
         # (handler routes those into the matching _view assignment).
-        for key_label, view_name, display in (("[1]", "connect", "Connect"), ("[2]", "runtime", "Runtime")):
+        for key_label, view_name, display in (("[1]", "connect", "Connect"), ("[2]", "runtime", "Runtime"), ("[3]", "help", "Help")):
             self._put(stdscr, footer_y, x, key_label, self._cyan() | self._bold())
             is_active = (current == view_name)
             label = f"[{display}]" if is_active else display
