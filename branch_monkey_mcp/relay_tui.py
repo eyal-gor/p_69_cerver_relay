@@ -465,22 +465,21 @@ class RelayTUI:
         bar_w = min(50, w - 4)
         y = 1
 
-        # Header — animated CERVER logo with kompany-relay subtitle.
-        # The big logo is the platform brand; the subtitle pins down which
-        # variant of the runtime is actually executing.
+        # Header — animated CERVER logo with a per-tab subtitle. The
+        # tab name doubles as the screen title so the user always knows
+        # which view they're on; version trails for support context.
         ver = f"v{s['version']}" if s["version"] else ""
+        subtitle_text = "Cerver Connect"
+        subtitle_full = f"{subtitle_text}  ·  {ver}" if ver else subtitle_text
         if w >= LOGO_WIDTH + 6:
             self._draw_animated_logo(stdscr, y, col)
             y += LOGO_HEIGHT
-            subtitle = f"cerver relay {ver}".rstrip()
-            self._put(stdscr, y, col + LOGO_WIDTH - len(subtitle), subtitle, self._dim())
+            self._put(stdscr, y, col + LOGO_WIDTH - len(subtitle_full), subtitle_full, self._dim())
             y += 1
             self._hline(stdscr, y, col, bar_w)
             y += 2
         else:
-            self._put(stdscr, y, col, "cerver", self._bold() | self._green())
-            self._put(stdscr, y, col + 7, "·", self._dim())
-            self._put(stdscr, y, col + 9, "relay", self._dim())
+            self._put(stdscr, y, col, subtitle_text, self._bold() | self._green())
             y += 1
             if ver:
                 self._put(stdscr, y, col, ver, self._dim())
@@ -773,21 +772,21 @@ class RelayTUI:
         bar_w = min(50, w - 4)
         y = 1
 
-        # Header — same logo treatment as Connect so the user always
-        # knows they're inside the relay TUI, regardless of which tab.
+        # Header — same logo treatment as Connect, but subtitle reads
+        # "Cerver Runtime" so the active tab is unambiguous even before
+        # the user looks at the bottom bar.
         ver = f"v{s['version']}" if s["version"] else ""
+        subtitle_text = "Cerver Runtime"
+        subtitle_full = f"{subtitle_text}  ·  {ver}" if ver else subtitle_text
         if w >= LOGO_WIDTH + 6:
             self._draw_animated_logo(stdscr, y, col)
             y += LOGO_HEIGHT
-            subtitle = f"cerver relay {ver}".rstrip()
-            self._put(stdscr, y, col + LOGO_WIDTH - len(subtitle), subtitle, self._dim())
+            self._put(stdscr, y, col + LOGO_WIDTH - len(subtitle_full), subtitle_full, self._dim())
             y += 1
             self._hline(stdscr, y, col, bar_w)
             y += 2
         else:
-            self._put(stdscr, y, col, "cerver", self._bold() | self._green())
-            self._put(stdscr, y, col + 7, "·", self._dim())
-            self._put(stdscr, y, col + 9, "relay", self._dim())
+            self._put(stdscr, y, col, subtitle_text, self._bold() | self._green())
             y += 1
             if ver:
                 self._put(stdscr, y, col, ver, self._dim())
