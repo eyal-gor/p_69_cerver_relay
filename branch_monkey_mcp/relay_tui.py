@@ -544,6 +544,58 @@ class RelayTUI:
             return fields[self._field_cursor]
         return None
 
+    # One-line title + 1–3 line description for each focusable field.
+    # Surfaced below the rows in an "About" panel that updates as the
+    # cursor moves — so the user can read what a row does without
+    # leaving the tab. Keep entries short; the panel reserves ~4 rows.
+    _FIELD_HELP = {
+        "name": (
+            "Machine name",
+            "Display label for this compute in the cerver dashboard and in",
+            "`cerver sessions` listings. Doesn't affect routing or auth.",
+        ),
+        "home": (
+            "Home directory",
+            "Default working directory the relay spawns CLI sessions in.",
+            "Tasks without an explicit cwd inherit this path.",
+        ),
+        "cli": (
+            "Default AI CLI",
+            "Provider used by `cerver run` / `cerver compare` when no",
+            "--cli flag is given. Switching here applies to new runs only.",
+        ),
+        "launchd": (
+            "Startup (launchd)",
+            "Whether macOS auto-launches the relay when you log in.",
+            "Enter toggles the launchd job install on/off.",
+        ),
+        "logout": (
+            "Logout",
+            "Signs out of this machine's cerver account and quits the relay.",
+            "You'll need to run `cerver login` again to reconnect.",
+        ),
+    }
+
+    def _draw_field_help(self, stdscr, y, col, bar_w):
+        """Render an 'About' section explaining the focused field.
+
+        Returns the y after the section so the caller can keep stacking
+        content below. No-ops when no field is focused (Help/Logs tabs).
+        """
+        key = self._focused_field_key()
+        if not key or key not in self._FIELD_HELP:
+            return y
+        title, line1, line2 = self._FIELD_HELP[key]
+        self._hline(stdscr, y, col, bar_w)
+        y += 1
+        self._put(stdscr, y, col + 2, "About  ·  " + title, self._bold() | self._cyan())
+        y += 1
+        self._put(stdscr, y, col + 2, line1, self._dim())
+        y += 1
+        self._put(stdscr, y, col + 2, line2, self._dim())
+        y += 1
+        return y
+
     def _focus_attr(self, base_attr=0):
         """Return the attr to use for a row's text when focused.
         Reverse-video on top of whatever base styling the row uses, so
@@ -843,6 +895,13 @@ class RelayTUI:
         self._put(stdscr, y, val_col, "Sign out of this machine", self._dim() | rev_logout)
         y += 1
 
+        # Contextual help — explains whatever row is currently focused
+        # so the user can read what each action does without leaving
+        # the tab. Renders only when a row is focused (Connect always
+        # has one of name/launchd/logout focused).
+        y += 1
+        y = self._draw_field_help(stdscr, y, col, bar_w)
+
         # Footer — tab nav first, then connect-specific actions.
         if not self._editing_home:
             curses.curs_set(0)
@@ -971,7 +1030,13 @@ class RelayTUI:
             self._put(stdscr, y, dot_x, "●", self._green() | rev_cli)
         else:
             self._put(stdscr, y, dot_x, "○", self._red() | rev_cli)
-        y += 2
+        y += 1
+
+        # Contextual help — explains whatever row is currently focused
+        # (Home or AI CLI on Runtime). Same panel shape as Connect.
+        y += 1
+        y = self._draw_field_help(stdscr, y, col, bar_w)
+        y += 1
 
         # Workload
         self._put(stdscr, y, lbl_col, "WORKLOAD", self._dim())
