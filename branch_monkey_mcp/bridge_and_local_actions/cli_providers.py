@@ -141,6 +141,7 @@ class CliProvider:
     display_name: str = ""
     install_hint: str = ""
     install_cmd: List[str] = []  # e.g. ["npm", "install", "-g", "package-name"]
+    health_cmd: List[str] = []   # e.g. ["codex", "--version"]
     api_key_env: str = ""       # Env var name for API key (e.g. ANTHROPIC_API_KEY)
     api_key_config: str = ""    # Config key in ~/.kompany/config.json
 
@@ -153,17 +154,55 @@ class CliProvider:
         if not self.install_cmd:
             return {"success": False, "output": "No install command configured"}
         try:
+            env = os.environ.copy()
+            resolver_path = _build_resolver_path()
+            if resolver_path:
+                env["PATH"] = resolver_path
             result = subprocess.run(
                 self.install_cmd,
                 capture_output=True, text=True, timeout=120,
+                env=env,
             )
             success = result.returncode == 0
             output = result.stdout + result.stderr
+            if success:
+                _invalidate_resolver_path_cache()
             return {"success": success, "output": output.strip()}
         except subprocess.TimeoutExpired:
             return {"success": False, "output": "Install timed out"}
         except Exception as e:
             return {"success": False, "output": str(e)}
+
+    def health_check(self) -> dict:
+        """Verify the installed CLI can actually start.
+
+        `is_available()` only proves a wrapper exists on PATH. It does not
+        catch the failure mode that broke the Mac mini: the wrapper was
+        present, but pointed at a missing/wrong-architecture vendor binary.
+        """
+        path = self.is_available()
+        if not path:
+            return {"ok": False, "path": None, "detail": "not installed"}
+
+        cmd = self.health_cmd or [self.name, "--version"]
+        try:
+            env = os.environ.copy()
+            resolver_path = _build_resolver_path()
+            if resolver_path:
+                env["PATH"] = resolver_path
+            result = subprocess.run(
+                cmd,
+                capture_output=True, text=True, timeout=15,
+                env=env,
+            )
+            output = (result.stdout + result.stderr).strip()
+            return {
+                "ok": result.returncode == 0,
+                "path": path,
+                "detail": output[-500:] if output else f"exit {result.returncode}",
+            }
+        except Exception as e:
+            return {"ok": False, "path": path, "detail": str(e)}
 
     def get_auth_status(self) -> dict:
         """Check authentication status.
@@ -296,6 +335,7 @@ class ClaudeCodeProvider(CliProvider):
     display_name = "Claude Code"
     install_hint = "npm install -g @anthropic-ai/claude-code"
     install_cmd = ["npm", "install", "-g", "@anthropic-ai/claude-code"]
+    health_cmd = ["claude", "--version"]
     api_key_env = "ANTHROPIC_API_KEY"
     api_key_config = "anthropic_api_key"
 
@@ -468,6 +508,7 @@ class CodexProvider(CliProvider):
     display_name = "Codex CLI"
     install_hint = "npm install -g @openai/codex"
     install_cmd = ["npm", "install", "-g", "@openai/codex"]
+    health_cmd = ["codex", "--version"]
     api_key_env = "OPENAI_API_KEY"
     api_key_config = "openai_api_key"
 
@@ -909,6 +950,7 @@ class GrokProvider(CliProvider):
     display_name = "Grok"
     install_hint = "npm install -g grok-cli"
     install_cmd = ["npm", "install", "-g", "grok-cli"]
+    health_cmd = ["grok", "--version"]
     api_key_env = "XAI_API_KEY"
     api_key_config = "xai_api_key"
 
@@ -1108,3 +1150,48 @@ def get_available_providers() -> Dict[str, dict]:
             "auth_detail": auth.get("detail", ""),
         }
     return result
+
+
+def provision_cli_providers(names: Optional[List[str]] = None) -> Dict[str, dict]:
+    """Install or repair CLI providers needed by the local relay.
+
+    This runs during relay startup so a registered Cerver compute is not
+    "ready" while its local CLI wrappers are broken. Missing auth is not a
+    provisioning failure; auth is handled separately by the TUI / vault.
+    """
+    selected = names or list(_PROVIDERS.keys())
+    results: Dict[str, dict] = {}
+    for name in selected:
+        provider = _PROVIDERS.get(name)
+        if not provider:
+            results[name] = {"ok": False, "action": "skip", "detail": "unknown provider"}
+            continue
+
+        before = provider.health_check()
+        if before.get("ok"):
+            results[name] = {
+                "ok": True,
+                "action": "verified",
+                "path": before.get("path"),
+                "detail": before.get("detail", ""),
+            }
+            continue
+
+        if not provider.install_cmd:
+            results[name] = {
+                "ok": False,
+                "action": "missing",
+                "path": before.get("path"),
+                "detail": before.get("detail", "no install command configured"),
+            }
+            continue
+
+        install = provider.install()
+        after = provider.health_check()
+        results[name] = {
+            "ok": bool(after.get("ok")),
+            "action": "installed" if install.get("success") else "install_failed",
+            "path": after.get("path") or before.get("path"),
+            "detail": after.get("detail") if after.get("ok") else install.get("output") or after.get("detail"),
+        }
+    return results

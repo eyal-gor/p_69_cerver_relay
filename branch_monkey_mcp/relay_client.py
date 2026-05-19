@@ -2746,6 +2746,29 @@ def main():
     except Exception as _probe_exc:
         print(f"[Relay] Provision probe failed: {_probe_exc}. Continuing with inherited PATH.")
 
+    # Install/repair the AI CLIs the relay advertises. The first probe
+    # above captures npm/node paths; this pass catches wrappers that exist
+    # but cannot start (for example Codex pointing at a missing x64 vendor
+    # binary on an arm64 Mac). Auth is intentionally separate: provisioning
+    # gets the binary runnable, then TUI/vault handles login or API keys.
+    if os.environ.get("CERVER_SKIP_CLI_PROVISION") != "1":
+        try:
+            from .bridge_and_local_actions.cli_providers import provision_cli_providers
+            results = provision_cli_providers()
+            repaired = False
+            for name, result in results.items():
+                action = result.get("action")
+                ok = "ok" if result.get("ok") else "failed"
+                path = result.get("path") or "-"
+                print(f"[Relay] CLI provision: {name} {action} ({ok}) {path}")
+                if action in ("installed", "install_failed"):
+                    repaired = True
+            if repaired:
+                _probed = _agent_env.probe()
+                _agent_env.set_current(_probed)
+        except Exception as _cli_provision_exc:
+            print(f"[Relay] CLI provision failed: {_cli_provision_exc}. Continuing; CLI spawns may fail.")
+
     # Handle --cli flag: persist default CLI choice
     if args.cli:
         try:
