@@ -72,6 +72,11 @@ class RelayTUI:
         self.state: Dict[str, Any] = {
             "version": "",
             "commit_sha": "",
+            # Snapshot from agent_environment.probe(). Keys:
+            #   binaries: {name -> resolved path}
+            #   missing_required: [names]
+            #   shell_path_captured: bool
+            "agent_env": {},
             "machine_name": "",
             "machine_id": "",
             "home_dir": "",
@@ -1330,6 +1335,55 @@ class RelayTUI:
                 self._put(stdscr, y, val_col + 2, "Not installed")
             y += 1
         y += 1
+
+        # DISCOVERED — output of the agent_environment.probe() that
+        # ran at startup. Shows the user exactly which `codex`, `node`,
+        # `claude`, etc. the relay will hand to agent subprocesses.
+        # If any REQUIRED binary is missing, surface it loudly in red —
+        # that's the failure mode the user otherwise only finds out
+        # about when an agent silently exits non-zero.
+        agent_env = s.get("agent_env") or {}
+        bins = agent_env.get("binaries") or {}
+        missing = agent_env.get("missing_required") or []
+        if bins or missing:
+            self._put(stdscr, y, lbl_col, "DISCOVERED", self._dim())
+            y += 1
+            self._hline(stdscr, y, col, bar_w)
+            y += 1
+
+            # Show the binaries that matter most to a running session
+            # first; everything else gets a one-line summary below.
+            primary = ["node", "codex", "claude", "git", "bash"]
+            shown: set[str] = set()
+            for name in primary:
+                if name in bins:
+                    self._put(stdscr, y, lbl_col, name, self._dim())
+                    path = bins[name]
+                    self._put(stdscr, y, val_col, path[: max(0, w - val_col - 2)])
+                    y += 1
+                    shown.add(name)
+                elif name in missing:
+                    self._put(stdscr, y, lbl_col, name, self._dim())
+                    self._put(stdscr, y, val_col, "● MISSING — agent spawn will fail", self._red() | self._bold())
+                    y += 1
+
+            extras = sorted(n for n in bins.keys() if n not in shown)
+            if extras:
+                self._put(stdscr, y, lbl_col, "also", self._dim())
+                detail = ", ".join(extras)
+                self._put(stdscr, y, val_col, detail[: max(0, w - val_col - 2)], self._dim())
+                y += 1
+            if not agent_env.get("shell_path_captured"):
+                self._put(stdscr, y, lbl_col, "", self._dim())
+                self._put(
+                    stdscr,
+                    y,
+                    val_col,
+                    "(login-shell PATH not captured — only well-known dirs probed)",
+                    self._dim(),
+                )
+                y += 1
+            y += 1
 
         # MAINTENANCE — focusable action rows for cerver-side upkeep.
         # First action: in-place upgrade of the local `cerver` CLI by

@@ -22,56 +22,7 @@ def resolve_cli_provider(cli_tool: str) -> CliProvider:
     return get_provider(cli_tool)
 
 
-_AGENT_PATH_DIRS = [
-    "/opt/homebrew/bin",            # Homebrew on Apple Silicon — codex, node, npm
-    "/opt/homebrew/sbin",
-    "/usr/local/bin",               # Homebrew on Intel + generic
-    "/usr/local/sbin",
-    "/opt/homebrew/opt/node/bin",
-    os.path.expanduser("~/.local/bin"),
-    os.path.expanduser("~/.npm-global/bin"),
-    os.path.expanduser("~/.bun/bin"),
-    os.path.expanduser("~/.cargo/bin"),
-    os.path.expanduser("~/.asdf/shims"),
-    os.path.expanduser("~/.volta/bin"),
-]
-
-
-def _augment_path_for_agent(path_value: str) -> str:
-    """Append standard macOS/Linux install dirs to PATH (additive only).
-
-    Why this matters: when the relay is started by launchd / install.sh
-    / any non-interactive context, its inherited PATH can be as sparse
-    as `~/.bun/bin:~/.local/bin:/usr/local/bin:/usr/bin:/bin`. That's
-    missing `/opt/homebrew/bin`, where the user's `codex`, `node`, and
-    `claude` actually live.
-
-    Symptom we hit today: cerver spawned `bash -c "cat <prompt> | codex
-    exec - --json"`; codex.js's `#!/usr/bin/env node` shebang couldn't
-    find node, codex failed with a nondescript ENOENT spawn error
-    pointing at a stale nvm path that no longer existed on disk.
-
-    Additive only — never reorders or removes the user's existing
-    entries. Each candidate is appended only if it isn't already on
-    PATH AND the directory exists on disk.
-    """
-    current = (path_value or "").split(os.pathsep) if path_value else []
-    seen = set(p for p in current if p)
-    extras = []
-    for d in _AGENT_PATH_DIRS:
-        if not d or d in seen:
-            continue
-        try:
-            if os.path.isdir(d):
-                extras.append(d)
-                seen.add(d)
-        except OSError:
-            pass
-    if not extras:
-        return path_value or ""
-    if current:
-        return os.pathsep.join(current + extras)
-    return os.pathsep.join(extras)
+from . import agent_environment
 
 
 def build_process_env(cli_cmd, extra_env: Optional[dict] = None) -> dict:
@@ -98,11 +49,15 @@ def build_process_env(cli_cmd, extra_env: Optional[dict] = None) -> dict:
     # Always remove CLAUDECODE to allow nested launches.
     env.pop("CLAUDECODE", None)
 
-    # Augment PATH so the agent subprocess can find codex/claude/node
-    # even when the relay's own PATH is sparse (launchd, install.sh).
-    # Pure addition — preserves whatever the host had and just appends
-    # known install locations that exist on disk.
-    env["PATH"] = _augment_path_for_agent(env.get("PATH", ""))
+    # Use the PATH that the agent_environment probe stitched together
+    # at relay startup — host PATH + login-shell PATH + well-known
+    # macOS/Linux install dirs. That probe knows where THIS machine's
+    # codex/claude/node actually live, including version-manager dirs
+    # like ~/.nvm/versions/node/<active>/bin which a static list can't
+    # cover. Falls back to env["PATH"] when the probe hasn't run yet.
+    probed = agent_environment.get_path_for_subprocess()
+    if probed:
+        env["PATH"] = probed
 
     # Layer Infisical-fetched secrets first so a rotated key in the vault
     # reaches the next CLI spawn without a relay restart — but only when

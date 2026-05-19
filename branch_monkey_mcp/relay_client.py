@@ -2295,11 +2295,25 @@ def _run_with_tui(args, home_dir, current_project, onboarding_needed=False):
         except Exception:
             pass
 
+    # Snapshot of the provision probe for the Provision tab.
+    _agent_env_snapshot: Dict[str, Any] = {}
+    try:
+        from .computer_runtime import agent_environment as _agent_env_mod
+        if _agent_env_mod.current:
+            _agent_env_snapshot = {
+                "binaries": dict(_agent_env_mod.current.binaries),
+                "missing_required": list(_agent_env_mod.current.missing_required),
+                "shell_path_captured": _agent_env_mod.current.shell_path_captured,
+            }
+    except Exception:
+        pass
+
     tui.update(
         version=VERSION,
         # Short SHA so "did my restart actually pick up the fix?" is a
         # one-glance check instead of grepping ps + uv cache contents.
         commit_sha=(CURRENT_COMMIT_SHA or "")[:7],
+        agent_env=_agent_env_snapshot,
         machine_name=args.name or socket.gethostname(),
         home_dir=home_dir,
         project=os.path.basename(current_project) if current_project else None,
@@ -2638,6 +2652,26 @@ def main():
     )
 
     args = parser.parse_args()
+
+    # Probe where this machine's agent binaries actually live. Runs once
+    # at startup, persists to ~/.cerver/agent_env.json, and from this
+    # point on every spawned subprocess uses the resolved canonical PATH
+    # via cli_runtime.build_process_env. Surfaced in the Provision tab
+    # so the user can see what was discovered.
+    try:
+        from .computer_runtime import agent_environment as _agent_env
+        _probed = _agent_env.probe()
+        _agent_env.set_current(_probed)
+        if _probed.missing_required:
+            print(
+                f"[Relay] Provision warning — missing required binaries: "
+                f"{', '.join(_probed.missing_required)}. Agent spawn may fail."
+            )
+        else:
+            found = sorted(_probed.binaries.keys())
+            print(f"[Relay] Provision: discovered {len(found)} binaries ({', '.join(found)})")
+    except Exception as _probe_exc:
+        print(f"[Relay] Provision probe failed: {_probe_exc}. Continuing with inherited PATH.")
 
     # Handle --cli flag: persist default CLI choice
     if args.cli:
