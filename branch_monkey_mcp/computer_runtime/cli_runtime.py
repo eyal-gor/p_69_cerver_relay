@@ -173,6 +173,17 @@ def spawn_cli_subprocess(cli_cmd, cwd: str, extra_env: Optional[dict] = None) ->
 
     extra_env: project-scoped env vars (secrets, config) to layer on top of
     the host's process env so the agent inherits them.
+
+    Buffering note: `bufsize=1` (line-buffered) only takes effect when
+    streams are opened in text mode. With binary stdout (which we want
+    so the JSON-line reader can handle UTF-8 surrogate edge-cases without
+    decoder errors), Python 3.10+ emits a RuntimeWarning and silently
+    falls back to the default block size — making CLI replies arrive in
+    chunks instead of line-by-line. That's been a hidden contributor to
+    "no reply within 1m30s" timeouts for low-volume outputs.
+    `bufsize=0` (unbuffered) is the right knob in binary mode: stdout is
+    flushed on every write, the JSON-line reader gets events as the CLI
+    emits them.
     """
     env = build_process_env(cli_cmd, extra_env=extra_env)
     return subprocess.Popen(
@@ -181,7 +192,7 @@ def spawn_cli_subprocess(cli_cmd, cwd: str, extra_env: Optional[dict] = None) ->
         stderr=subprocess.STDOUT,
         cwd=cwd,
         env=env,
-        bufsize=1,
+        bufsize=0,
         universal_newlines=False,
     )
 
