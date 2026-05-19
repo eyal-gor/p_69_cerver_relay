@@ -135,6 +135,9 @@ class RelayTUI:
         self._on_logout = None  # Callback when user logs out
         self._on_launchd_install = None  # Callback when user chooses launchd option
         self._launchd_selected = 0  # 0=Yes, 1=No for the prompt menu
+        # Quit confirmation. Default selection is "No" so a stray Enter
+        # press after the modal opens doesn't kill the relay accidentally.
+        self._quit_selected = 1  # 0=Yes (quit), 1=No (cancel)
         self._on_cli_set = None  # Callback when user selects a CLI provider
         self._cli_selected = 0  # Index into installed providers list
         # CLI auth sub-modes within CLI prompt
@@ -283,6 +286,14 @@ class RelayTUI:
             self._handle_launchd_prompt_key(key)
             return
 
+        # Quit confirmation modal — takes over keyboard until resolved.
+        # Sits AFTER the wizard prompts above so it can't fire while
+        # the user is mid-onboarding (those modes have their own quit
+        # paths via Ctrl-C / Esc; double-confirming would just be noise).
+        if s.get("quit_prompt") == "pending":
+            self._handle_quit_prompt_key(key)
+            return
+
         # Machine name editing mode
         if self._editing_name:
             if key in (curses.KEY_ENTER, 10, 13):  # Enter
@@ -361,7 +372,11 @@ class RelayTUI:
             return
 
         if key == ord("q") or key == ord("Q"):
-            self._running = False
+            # Defer the actual quit until the confirmation modal resolves.
+            # Reset the selection to "No" each open so a long-held Enter
+            # doesn't barrel through both the open and the confirm.
+            self._quit_selected = 1
+            self.state["quit_prompt"] = "pending"
         elif key == ord("l") or key == ord("L"):
             if self._view == "logs":
                 self._view = self._last_main_view
@@ -823,6 +838,12 @@ class RelayTUI:
         # CLI selection prompt (after launchd, or when [C] pressed)
         if s.get("cli_prompt") == "pending":
             self._draw_cli_prompt(stdscr, y, col, bar_w)
+            return
+
+        # Quit confirmation modal — last so it overlays whatever the
+        # user was looking at, but never collides with the wizards.
+        if s.get("quit_prompt") == "pending":
+            self._draw_quit_prompt(stdscr, y, col, bar_w)
             return
 
         # Version — number of commits in the relay repo (bumps every commit)
@@ -1840,6 +1861,76 @@ class RelayTUI:
         x += 14
         self._put(stdscr, y, x, "[Enter]", self._cyan() | self._bold())
         self._put(stdscr, y, x + 8, "Confirm", self._dim())
+
+    def _handle_quit_prompt_key(self, key):
+        """Keyboard input while the quit confirmation modal is open.
+
+        Enter on the current selection commits. Up/Down or 1/2 reposition
+        the cursor. Y is a fast-path to confirm. N or Esc cancels. A
+        second Q press also cancels — pressing Q again is more naturally
+        "I changed my mind" than "yes, definitely".
+        """
+        if key in (curses.KEY_UP, ord("k"), ord("K")):
+            self._quit_selected = 0
+        elif key in (curses.KEY_DOWN, ord("j"), ord("J")):
+            self._quit_selected = 1
+        elif key == ord("1"):
+            self._quit_selected = 0
+        elif key == ord("2"):
+            self._quit_selected = 1
+        elif key in (ord("y"), ord("Y")):
+            # Y is a hard yes regardless of cursor position.
+            self.state["quit_prompt"] = None
+            self._running = False
+        elif key in (ord("n"), ord("N"), 27, ord("q"), ord("Q")):
+            # N / Esc / second-Q all cancel.
+            self.state["quit_prompt"] = None
+        elif key in (curses.KEY_ENTER, 10, 13):
+            if self._quit_selected == 0:
+                self.state["quit_prompt"] = None
+                self._running = False
+            else:
+                self.state["quit_prompt"] = None
+
+    def _draw_quit_prompt(self, stdscr, y, col, bar_w):
+        """Centered confirmation before the relay shuts down. Borrows
+        the launchd-prompt layout so the visual vocabulary stays
+        consistent across modals.
+        """
+        lbl_col = col + 2
+
+        self._put(stdscr, y, lbl_col, "Quit the relay?", self._bold())
+        y += 2
+        self._put(stdscr, y, lbl_col, "Shutting down ends any in-flight agent runs", self._dim())
+        y += 1
+        self._put(stdscr, y, lbl_col, "and disconnects this compute from gateway.cerver.ai.", self._dim())
+        y += 2
+
+        options = ["Yes, quit", "No, keep running"]
+        for i, opt in enumerate(options):
+            if i == self._quit_selected:
+                self._put(stdscr, y, lbl_col, f"  ▸ {i+1}.", self._cyan() | self._bold())
+                self._put(stdscr, y, lbl_col + 7, opt, self._cyan() | self._bold())
+            else:
+                self._put(stdscr, y, lbl_col + 4, f"{i+1}.", self._dim())
+                self._put(stdscr, y, lbl_col + 7, opt)
+            y += 1
+        y += 1
+
+        self._hline(stdscr, y, col, bar_w)
+        y += 1
+        x = lbl_col
+        self._put(stdscr, y, x, "[↑↓]", self._cyan() | self._bold())
+        self._put(stdscr, y, x + 5, "Select", self._dim())
+        x += 14
+        self._put(stdscr, y, x, "[Enter]", self._cyan() | self._bold())
+        self._put(stdscr, y, x + 8, "Confirm", self._dim())
+        x += 18
+        self._put(stdscr, y, x, "[Y/N]", self._cyan() | self._bold())
+        self._put(stdscr, y, x + 6, "Fast", self._dim())
+        x += 12
+        self._put(stdscr, y, x, "[Esc]", self._cyan() | self._bold())
+        self._put(stdscr, y, x + 6, "Cancel", self._dim())
 
     def _handle_cli_prompt_key(self, key):
         """Handle keyboard input during CLI selection prompt."""
