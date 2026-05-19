@@ -147,6 +147,13 @@ class RelayTUI:
         self._on_cli_install = None  # Callback(provider_name) -> installs CLI async
         self._on_cli_refresh = None  # Callback() -> refreshes provider state
         self._cli_installing = None  # Name of provider being installed
+        # Per-tab field cursor for Up/Down + Enter navigation. Only the
+        # Connect tab has actionable rows today (machine, home, CLI,
+        # startup, logout). Index resets on tab switch so cursor doesn't
+        # land on a stale slot. See _connect_field_keys() for the live
+        # ordered list (it's dynamic — launchd row only renders when
+        # launchd state is known).
+        self._field_cursor = 0
         self._verbose = False
         self._history_len = 36
         self._metric_history = {
@@ -361,23 +368,27 @@ class RelayTUI:
                     self._last_main_view = self._view
                 self._view = "logs"
                 self._scroll_offset = 0
+            self._field_cursor = 0
         elif key == ord("1"):
             # Direct nav: Connect tab. Also resets _last_main_view so
             # [L] from a sub-view returns here.
             if self._view != "connect":
                 self._view = "connect"
                 self._last_main_view = "connect"
+                self._field_cursor = 0
         elif key == ord("2"):
             # Direct nav: Runtime tab.
             if self._view != "runtime":
                 self._view = "runtime"
                 self._last_main_view = "runtime"
+                self._field_cursor = 0
         elif key == ord("3"):
             # Direct nav: Help tab. Static reference page — no live
             # state, so refresh interval falls back to slow.
             if self._view != "help":
                 self._view = "help"
                 self._last_main_view = "help"
+                self._field_cursor = 0
         elif key == ord("4"):
             # Direct nav: Logs tab. Mirrors the [L] toggle's enter path,
             # without the back-toggle behavior — [4] always lands you on
@@ -386,46 +397,53 @@ class RelayTUI:
                 self._view = "logs"
                 self._scroll_offset = 0
             self._last_main_view = "logs"
+            self._field_cursor = 0
         elif key == ord("n") or key == ord("N"):
             if self._view == "connect":
-                self._editing_name = True
-                self._name_input = self.state.get("machine_name", "")
-                self._name_cursor = len(self._name_input)
-                if stdscr:
-                    curses.curs_set(1)
+                self._action_edit_name(stdscr)
         elif key == ord("h") or key == ord("H"):
             if self._view == "connect":
-                self._editing_home = True
-                self._home_input = self.state.get("home_dir", "")
-                self._home_cursor = len(self._home_input)
-                if stdscr:
-                    curses.curs_set(1)
+                self._action_edit_home(stdscr)
         elif key == ord("v") or key == ord("V"):
             if self._view in ("connect", "runtime"):
                 self._verbose = not self._verbose
         elif key == ord("s") or key == ord("S"):
-            if self._view == "connect" and self._on_launchd_install:
-                ld = self.state.get("launchd")
-                if ld in ("running", "installed"):
-                    self._on_launchd_install(False)  # uninstall
-                else:
-                    self._on_launchd_install(True)  # install
+            if self._view == "connect":
+                self._action_toggle_launchd()
         elif key == ord("c") or key == ord("C"):
             if self._view == "connect":
-                # Open CLI selection prompt
-                providers = self.state.get("cli_providers", {})
-                installed = [n for n, p in providers.items() if p.get("installed")]
-                current = self.state.get("default_cli", "claude")
-                self._cli_selected = installed.index(current) if current in installed else 0
-                self.state["cli_prompt"] = "pending"
+                self._action_pick_cli()
         elif key == ord("d") or key == ord("D"):
-            if self._view == "connect" and self._on_logout:
-                self._on_logout()
-                self._running = False
+            if self._view == "connect":
+                self._action_logout()
         elif key == curses.KEY_UP and self._view == "logs":
             self._scroll_offset += 1
         elif key == curses.KEY_DOWN and self._view == "logs":
             self._scroll_offset = max(0, self._scroll_offset - 1)
+        elif key == curses.KEY_UP and self._view == "connect":
+            fields = self._connect_field_keys()
+            if fields:
+                self._field_cursor = (self._field_cursor - 1) % len(fields)
+        elif key == curses.KEY_DOWN and self._view == "connect":
+            fields = self._connect_field_keys()
+            if fields:
+                self._field_cursor = (self._field_cursor + 1) % len(fields)
+        elif key in (curses.KEY_ENTER, 10, 13) and self._view == "connect":
+            # Enter on the focused field dispatches to its action handler
+            # — same path as the legacy letter shortcuts ([N]/[H]/[S]/[C]/[D]),
+            # which we keep around for muscle-memory back-compat.
+            fields = self._connect_field_keys()
+            if 0 <= self._field_cursor < len(fields):
+                key_name = fields[self._field_cursor]
+                handler = {
+                    "name": lambda: self._action_edit_name(stdscr),
+                    "home": lambda: self._action_edit_home(stdscr),
+                    "cli": self._action_pick_cli,
+                    "launchd": self._action_toggle_launchd,
+                    "logout": self._action_logout,
+                }.get(key_name)
+                if handler:
+                    handler()
         elif key in (curses.KEY_LEFT, curses.KEY_RIGHT) and self._view in ("connect", "runtime", "help", "logs"):
             # ←/→ cycles forward/backward through the four main tabs.
             # Logs is now a peer tab rather than a sub-view — [L] still
@@ -434,10 +452,81 @@ class RelayTUI:
             i = order.index(self._view)
             step = -1 if key == curses.KEY_LEFT else 1
             self._view = order[(i + step) % len(order)]
+            # Reset the field cursor so a fresh tab lands focus on the
+            # first actionable row instead of carrying a stale index
+            # from a different tab's field list.
+            self._field_cursor = 0
             # Logs has its own scroll state; tracking it as a "main view"
             # so toggling [L] from elsewhere remembers it as the return
             # target is fine — same semantics the other tabs already use.
             self._last_main_view = self._view
+
+    # ── connect-tab field actions (also triggered by Enter on cursor) ──
+
+    def _connect_field_keys(self) -> list:
+        """Ordered list of focusable field keys on the Connect tab.
+
+        Launchd row is conditional on `self.state["launchd"] is not None`;
+        the cursor list mirrors that so Up/Down doesn't land on a slot
+        that has no visible row.
+        """
+        fields = ["name", "home", "cli"]
+        if self.state.get("launchd") is not None:
+            fields.append("launchd")
+        fields.append("logout")
+        return fields
+
+    def _action_edit_name(self, stdscr=None):
+        self._editing_name = True
+        self._name_input = self.state.get("machine_name", "")
+        self._name_cursor = len(self._name_input)
+        if stdscr:
+            curses.curs_set(1)
+
+    def _action_edit_home(self, stdscr=None):
+        self._editing_home = True
+        self._home_input = self.state.get("home_dir", "")
+        self._home_cursor = len(self._home_input)
+        if stdscr:
+            curses.curs_set(1)
+
+    def _action_toggle_launchd(self):
+        if not self._on_launchd_install:
+            return
+        ld = self.state.get("launchd")
+        if ld in ("running", "installed"):
+            self._on_launchd_install(False)
+        else:
+            self._on_launchd_install(True)
+
+    def _action_pick_cli(self):
+        providers = self.state.get("cli_providers", {})
+        installed = [n for n, p in providers.items() if p.get("installed")]
+        current = self.state.get("default_cli", "claude")
+        self._cli_selected = installed.index(current) if current in installed else 0
+        self.state["cli_prompt"] = "pending"
+
+    def _action_logout(self):
+        if not self._on_logout:
+            return
+        self._on_logout()
+        self._running = False
+
+    def _focused_field_key(self) -> Optional[str]:
+        """The symbolic key of the currently focused Connect-tab row,
+        or None when the cursor doesn't apply to the current view."""
+        if self._view != "connect":
+            return None
+        fields = self._connect_field_keys()
+        if 0 <= self._field_cursor < len(fields):
+            return fields[self._field_cursor]
+        return None
+
+    def _draw_focus_marker(self, stdscr, y, col, is_focused):
+        """Draw a ▶ glyph in the gutter when a row is focused. Falls
+        back gracefully on narrow widths."""
+        if is_focused:
+            self._put(stdscr, y, col, "▶", self._cyan() | self._bold())
 
     # ── drawing helpers ──────────────────────────────────────────────
 
@@ -494,12 +583,18 @@ class RelayTUI:
         # which view they're on; version trails for support context.
         ver = f"v{s['version']}" if s["version"] else ""
         subtitle_text = "Cerver Connect"
-        subtitle_full = f"{subtitle_text}  ·  {ver}" if ver else subtitle_text
         if w >= LOGO_WIDTH + 6:
             self._draw_animated_logo(stdscr, y, col)
             y += LOGO_HEIGHT
-            self._put(stdscr, y, col + LOGO_WIDTH - len(subtitle_full), subtitle_full, self._dim())
-            y += 1
+            # Subtitle bumped from dim → bold green so the active tab
+            # name pops next to the animated logo. Version stays dim
+            # and trails the title as soft context.
+            self._put(stdscr, y, col + LOGO_WIDTH - len(subtitle_text), subtitle_text, self._bold() | self._green())
+            if ver:
+                self._put(stdscr, y + 1, col + LOGO_WIDTH - len(ver), ver, self._dim())
+                y += 2
+            else:
+                y += 1
             self._hline(stdscr, y, col, bar_w)
             y += 2
         else:
@@ -543,7 +638,10 @@ class RelayTUI:
             self._put(stdscr, y, val_col, s["user_email"], self._bold())
             y += 1
 
-        # Machine info — editable field
+        # Machine info — editable field. ▶ marker indicates the row is
+        # focused for the Up/Down/Enter nav; old letter shortcuts ([N])
+        # still work but no longer clutter the row.
+        self._draw_focus_marker(stdscr, y, col, self._focused_field_key() == "name")
         self._put(stdscr, y, lbl_col, "Machine", self._dim())
         if self._editing_name:
             field_w = max(30, bar_w - val_col + col)
@@ -556,11 +654,12 @@ class RelayTUI:
                 pass
         else:
             machine_val = s.get("machine_name", "\u2014")
-            self._put(stdscr, y, val_col, machine_val, self._bold())
-            self._put(stdscr, y, val_col + len(machine_val) + 1, "[N]", self._dim())
+            attr = self._bold() | (self._cyan() if self._focused_field_key() == "name" else 0)
+            self._put(stdscr, y, val_col, machine_val, attr)
         y += 1
 
         # Home — editable field
+        self._draw_focus_marker(stdscr, y, col, self._focused_field_key() == "home")
         self._put(stdscr, y, lbl_col, "Home", self._dim())
         if self._editing_home:
             # Show input field with cursor
@@ -580,8 +679,8 @@ class RelayTUI:
             y += 2
         else:
             home_val = s.get("home_dir", "\u2014")
-            self._put(stdscr, y, val_col, home_val, self._bold())
-            self._put(stdscr, y, val_col + len(home_val) + 1, "[H]", self._dim())
+            attr = self._bold() | (self._cyan() if self._focused_field_key() == "home" else 0)
+            self._put(stdscr, y, val_col, home_val, attr)
             y += 1
 
         if s.get("project"):
@@ -595,15 +694,16 @@ class RelayTUI:
         default_provider = providers.get(default_cli, {})
         cli_display = default_provider.get("display_name", default_cli.title())
         cli_authed = default_provider.get("authenticated", False)
+        self._draw_focus_marker(stdscr, y, col, self._focused_field_key() == "cli")
         self._put(stdscr, y, lbl_col, "AI CLI", self._dim())
-        self._put(stdscr, y, val_col, cli_display, self._bold())
+        cli_attr = self._bold() | (self._cyan() if self._focused_field_key() == "cli" else 0)
+        self._put(stdscr, y, val_col, cli_display, cli_attr)
         # Auth status dot
         dot_x = val_col + len(cli_display) + 1
         if cli_authed:
             self._put(stdscr, y, dot_x, "\u25cf", self._green())
         else:
             self._put(stdscr, y, dot_x, "\u25cb", self._red())
-        self._put(stdscr, y, dot_x + 2, "[C]", self._dim())
         y += 1
 
         dashboard_url = s.get("dashboard_url", f"http://localhost:{s['port']}/")
@@ -750,6 +850,7 @@ class RelayTUI:
         # Startup (launchd)
         ld = s.get("launchd")
         if ld is not None:
+            self._draw_focus_marker(stdscr, y, col, self._focused_field_key() == "launchd")
             self._put(stdscr, y, lbl_col, "Startup", self._dim())
             if ld == "running":
                 self._put(stdscr, y, val_col, "\u25cf", self._green() | self._bold())
@@ -777,6 +878,17 @@ class RelayTUI:
         self._put(stdscr, y, val_col, str(rc), self._green() if rc == 0 else self._yellow())
         y += 1
 
+        # Logout — action row, no live data. Rendered as a focusable
+        # entry so the Up/Down/Enter nav has a place to land on the
+        # "logout" cursor slot (formerly the [D] keystroke). The legacy
+        # [D] still works.
+        y += 1
+        self._draw_focus_marker(stdscr, y, col, self._focused_field_key() == "logout")
+        logout_attr = self._dim() | (self._cyan() if self._focused_field_key() == "logout" else 0)
+        self._put(stdscr, y, lbl_col, "Logout", logout_attr)
+        self._put(stdscr, y, val_col, "Sign out of this machine", self._dim())
+        y += 1
+
         # Footer — tab nav first, then connect-specific actions.
         if not self._editing_home:
             curses.curs_set(0)
@@ -801,12 +913,18 @@ class RelayTUI:
         # the user looks at the bottom bar.
         ver = f"v{s['version']}" if s["version"] else ""
         subtitle_text = "Cerver Runtime"
-        subtitle_full = f"{subtitle_text}  ·  {ver}" if ver else subtitle_text
         if w >= LOGO_WIDTH + 6:
             self._draw_animated_logo(stdscr, y, col)
             y += LOGO_HEIGHT
-            self._put(stdscr, y, col + LOGO_WIDTH - len(subtitle_full), subtitle_full, self._dim())
-            y += 1
+            # Subtitle bumped to bold green (was dim) — keeps the active
+            # tab name legible next to the logo. Version on its own dim
+            # line below to free up emphasis.
+            self._put(stdscr, y, col + LOGO_WIDTH - len(subtitle_text), subtitle_text, self._bold() | self._green())
+            if ver:
+                self._put(stdscr, y + 1, col + LOGO_WIDTH - len(ver), ver, self._dim())
+                y += 2
+            else:
+                y += 1
             self._hline(stdscr, y, col, bar_w)
             y += 2
         else:
@@ -1127,25 +1245,17 @@ class RelayTUI:
         x += 13
 
         if current == "connect":
-            # Identity edits + setup actions only apply on the Connect
-            # tab — their handlers gate on _view == "connect".
-            self._put(stdscr, footer_y, x, "[N]", self._cyan() | self._bold())
-            self._put(stdscr, footer_y, x + 4, "Name", self._dim())
-            x += 10
-            self._put(stdscr, footer_y, x, "[H]", self._cyan() | self._bold())
-            self._put(stdscr, footer_y, x + 4, "Home", self._dim())
-            x += 10
-            self._put(stdscr, footer_y, x, "[S]", self._cyan() | self._bold())
-            ld = self.state.get("launchd")
-            s_label = "Uninstall" if ld in ("running", "installed") else "Startup"
-            self._put(stdscr, footer_y, x + 4, s_label, self._dim())
-            x += 4 + len(s_label) + 2
-            self._put(stdscr, footer_y, x, "[C]", self._cyan() | self._bold())
-            self._put(stdscr, footer_y, x + 4, "CLI", self._dim())
-            x += 9
-            self._put(stdscr, footer_y, x, "[D]", self._cyan() | self._bold())
-            self._put(stdscr, footer_y, x + 4, "Logout", self._dim())
-            x += 12
+            # Connect tab has actionable rows now navigated by Up/Down
+            # + Enter — the old per-row letter shortcuts ([N]/[H]/[S]/
+            # [C]/[D]) still work as keybindings, but they don't need
+            # to crowd the footer anymore. One contextual hint replaces
+            # the row of letters.
+            self._put(stdscr, footer_y, x, "[↑↓]", self._cyan() | self._bold())
+            self._put(stdscr, footer_y, x + 5, "Select", self._dim())
+            x += 13
+            self._put(stdscr, footer_y, x, "[Enter]", self._cyan() | self._bold())
+            self._put(stdscr, footer_y, x + 8, "Edit", self._dim())
+            x += 14
 
         self._put(stdscr, footer_y, x, "[Q]", self._cyan() | self._bold())
         self._put(stdscr, footer_y, x + 4, "Quit", self._dim())
