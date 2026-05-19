@@ -71,6 +71,7 @@ class RelayTUI:
     def __init__(self):
         self.state: Dict[str, Any] = {
             "version": "",
+            "commit_sha": "",
             "machine_name": "",
             "machine_id": "",
             "home_dir": "",
@@ -776,6 +777,20 @@ class RelayTUI:
     def _bold(self):
         return curses.A_BOLD
 
+    def _version_label(self, s) -> str:
+        """Header version string: `v369 · 8b6e791`. The commit SHA lets
+        you tell at a glance whether a restart actually loaded fresh code
+        — previously two relays running different commits both showed
+        the same v-number and you had to grep ps + uv cache to disambiguate.
+        """
+        ver = s.get("version") or ""
+        sha = s.get("commit_sha") or ""
+        if ver and sha:
+            return f"v{ver} · {sha}"
+        if ver:
+            return f"v{ver}"
+        return sha
+
     # ── connect view ─────────────────────────────────────────────────
     # Identity (who am I), transport (am I reachable?), setup (install
     # state of relay autostart + cerver CLI). Sibling view to Runtime,
@@ -795,7 +810,7 @@ class RelayTUI:
         # Header — animated CERVER logo with a per-tab subtitle. The
         # tab name doubles as the screen title so the user always knows
         # which view they're on; version trails for support context.
-        ver = f"v{s['version']}" if s["version"] else ""
+        ver = self._version_label(s)
         subtitle_text = "Cerver Connect"
         if w >= LOGO_WIDTH + 6:
             self._draw_animated_logo(stdscr, y, col)
@@ -1096,7 +1111,7 @@ class RelayTUI:
         y = 1
 
         # Header — same animated logo treatment as Connect/Runtime.
-        ver = f"v{s['version']}" if s["version"] else ""
+        ver = self._version_label(s)
         subtitle_text = "Cerver Provision"
         if w >= LOGO_WIDTH + 6:
             self._draw_animated_logo(stdscr, y, col)
@@ -1367,7 +1382,7 @@ class RelayTUI:
         # Header — same logo treatment as Connect, but subtitle reads
         # "Cerver Runtime" so the active tab is unambiguous even before
         # the user looks at the bottom bar.
-        ver = f"v{s['version']}" if s["version"] else ""
+        ver = self._version_label(s)
         subtitle_text = "Cerver Runtime"
         if w >= LOGO_WIDTH + 6:
             self._draw_animated_logo(stdscr, y, col)
@@ -1540,7 +1555,7 @@ class RelayTUI:
         # tab swap is visually consistent. No animated logo here; this
         # page is static and the logo eats vertical room help needs.
         self._put(stdscr, y, col, "Cerver Help", self._bold())
-        ver = f"v{s['version']}" if s.get("version") else ""
+        ver = self._version_label(s)
         if ver:
             self._put(stdscr, y, col + bar_w - len(ver) - 2, ver, self._dim())
         y += 1

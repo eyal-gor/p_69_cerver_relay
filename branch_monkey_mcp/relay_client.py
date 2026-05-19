@@ -1874,15 +1874,95 @@ def is_port_in_use(port: int) -> bool:
         return s.connect_ex(('127.0.0.1', port)) == 0
 
 
+def _port_holder_info(port: int) -> Optional[Dict[str, str]]:
+    """Identify the process holding `port`. Returns {pid, command} or None.
+
+    Used at startup to decide whether the port-in-use we're hitting is a
+    stale relay we can recycle, or something else we should refuse to
+    step on. lsof is on every macOS and most Linux distros — fail
+    silently if it's missing or returns garbage.
+    """
+    try:
+        result = subprocess.run(
+            ["lsof", "-ti", f":{port}"],
+            capture_output=True, text=True, timeout=2,
+        )
+        pid = (result.stdout or "").strip().split("\n")[0]
+        if not pid.isdigit():
+            return None
+        ps = subprocess.run(
+            ["ps", "-p", pid, "-o", "command="],
+            capture_output=True, text=True, timeout=2,
+        )
+        return {"pid": pid, "command": (ps.stdout or "").strip()}
+    except Exception:
+        return None
+
+
+def _looks_like_relay(command: str) -> bool:
+    """Heuristic: is this command line another instance of *us*?
+
+    We try to be specific so we don't auto-kill an unrelated process
+    that happens to use port 18081 — match on our own entry-point names
+    rather than anything generic like "python".
+    """
+    needles = ("branch-monkey-relay", "branch_monkey_mcp", "cerver-relay")
+    return any(n in command for n in needles)
+
+
+def _try_take_over_port(port: int, holder: Dict[str, str]) -> bool:
+    """When a stale relay holds `port`, kill it so we can bind.
+
+    Returns True if the port is free after the kill (the caller can
+    proceed), False otherwise. SIGTERM first with a short grace window,
+    then SIGKILL — the relay's signal handler should let it clean up
+    cleanly when possible.
+    """
+    import time
+    pid = holder["pid"]
+    print(f"[Relay] Port {port} held by stale relay (pid {pid}). Reclaiming.")
+    for sig in (15, 9):
+        try:
+            os.kill(int(pid), sig)
+        except ProcessLookupError:
+            break
+        except Exception as e:
+            print(f"[Relay] kill -{sig} {pid} failed: {e}")
+            return False
+        # Give the OS up to 1.5s to release the port before escalating.
+        for _ in range(15):
+            time.sleep(0.1)
+            if not is_port_in_use(port):
+                print(f"[Relay] Reclaimed port {port}.")
+                return True
+    return not is_port_in_use(port)
+
+
 def start_server_in_background(port: int = 18081, home_dir: Optional[str] = None, working_dir: Optional[str] = None):
-    """Start the local agent server in a background thread."""
+    """Start the local agent server in a background thread.
+
+    If the port is held by another relay process (stale instance,
+    crashed launchd job, leftover from a prior session), reclaim the
+    port automatically — silently running in zombie mode (the old
+    behavior) hid bugs for hours during real incident response.
+
+    If the port is held by something we don't recognize as a relay,
+    refuse to start and surface the holder so the user can decide.
+    """
     import threading
 
-    # Check if port is already in use
     if is_port_in_use(port):
-        print(f"[Relay] Port {port} is already in use - skipping local server")
-        print(f"[Relay] Another relay might be running. Kill it with: lsof -ti:{port} | xargs kill -9")
-        return None
+        holder = _port_holder_info(port)
+        if holder and _looks_like_relay(holder["command"]):
+            if not _try_take_over_port(port, holder):
+                print(f"[Relay] Could not reclaim port {port} from pid {holder['pid']}. Exiting.")
+                print(f"[Relay] Run manually: lsof -ti:{port} | xargs kill -9")
+                sys.exit(2)
+        else:
+            who = f"pid {holder['pid']} ({holder['command']})" if holder else "unknown process"
+            print(f"[Relay] Port {port} is held by {who} — refusing to start.")
+            print(f"[Relay] If it's safe to kill: lsof -ti:{port} | xargs kill -9")
+            sys.exit(2)
 
     def run():
         from .bridge_and_local_actions import run_server, set_default_working_dir, set_home_directory
@@ -2193,6 +2273,9 @@ def _run_with_tui(args, home_dir, current_project, onboarding_needed=False):
 
     tui.update(
         version=VERSION,
+        # Short SHA so "did my restart actually pick up the fix?" is a
+        # one-glance check instead of grepping ps + uv cache contents.
+        commit_sha=(CURRENT_COMMIT_SHA or "")[:7],
         machine_name=args.name or socket.gethostname(),
         home_dir=home_dir,
         project=os.path.basename(current_project) if current_project else None,
