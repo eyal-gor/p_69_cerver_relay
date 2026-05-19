@@ -402,7 +402,9 @@ class RelayTUI:
             if self._view == "connect":
                 self._action_edit_name(stdscr)
         elif key == ord("h") or key == ord("H"):
-            if self._view == "connect":
+            # Home moved to Runtime — accept [H] from either tab so old
+            # muscle memory still works.
+            if self._view in ("connect", "runtime"):
                 self._action_edit_home(stdscr)
         elif key == ord("v") or key == ord("V"):
             if self._view in ("connect", "runtime"):
@@ -411,7 +413,8 @@ class RelayTUI:
             if self._view == "connect":
                 self._action_toggle_launchd()
         elif key == ord("c") or key == ord("C"):
-            if self._view == "connect":
+            # AI CLI moved to Runtime — accept [C] from either tab too.
+            if self._view in ("connect", "runtime"):
                 self._action_pick_cli()
         elif key == ord("d") or key == ord("D"):
             if self._view == "connect":
@@ -420,19 +423,21 @@ class RelayTUI:
             self._scroll_offset += 1
         elif key == curses.KEY_DOWN and self._view == "logs":
             self._scroll_offset = max(0, self._scroll_offset - 1)
-        elif key == curses.KEY_UP and self._view == "connect":
-            fields = self._connect_field_keys()
+        elif key == curses.KEY_UP and self._view in ("connect", "runtime"):
+            fields = self._active_field_keys()
             if fields:
                 self._field_cursor = (self._field_cursor - 1) % len(fields)
-        elif key == curses.KEY_DOWN and self._view == "connect":
-            fields = self._connect_field_keys()
+        elif key == curses.KEY_DOWN and self._view in ("connect", "runtime"):
+            fields = self._active_field_keys()
             if fields:
                 self._field_cursor = (self._field_cursor + 1) % len(fields)
-        elif key in (curses.KEY_ENTER, 10, 13) and self._view == "connect":
+        elif key in (curses.KEY_ENTER, 10, 13) and self._view in ("connect", "runtime"):
             # Enter on the focused field dispatches to its action handler
             # — same path as the legacy letter shortcuts ([N]/[H]/[S]/[C]/[D]),
-            # which we keep around for muscle-memory back-compat.
-            fields = self._connect_field_keys()
+            # which we keep around for muscle-memory back-compat. Both
+            # Connect (name/launchd/logout) and Runtime (home/cli) flow
+            # through the same handler dispatch table.
+            fields = self._active_field_keys()
             if 0 <= self._field_cursor < len(fields):
                 key_name = fields[self._field_cursor]
                 handler = {
@@ -466,15 +471,31 @@ class RelayTUI:
     def _connect_field_keys(self) -> list:
         """Ordered list of focusable field keys on the Connect tab.
 
-        Launchd row is conditional on `self.state["launchd"] is not None`;
-        the cursor list mirrors that so Up/Down doesn't land on a slot
-        that has no visible row.
+        Connect is identity + transport + setup. Home and AI CLI moved
+        to Runtime (they describe HOW the relay runs work, not WHO it
+        is). Launchd row is conditional on `self.state["launchd"]`.
         """
-        fields = ["name", "home", "cli"]
+        fields = ["name"]
         if self.state.get("launchd") is not None:
             fields.append("launchd")
         fields.append("logout")
         return fields
+
+    def _runtime_field_keys(self) -> list:
+        """Ordered list of focusable field keys on the Runtime tab.
+
+        Runtime covers HOW the relay runs work: where (Home) and with
+        what (AI CLI default).
+        """
+        return ["home", "cli"]
+
+    def _active_field_keys(self) -> list:
+        """Field list for whichever tab the cursor is currently on."""
+        if self._view == "connect":
+            return self._connect_field_keys()
+        if self._view == "runtime":
+            return self._runtime_field_keys()
+        return []
 
     def _action_edit_name(self, stdscr=None):
         self._editing_name = True
@@ -513,11 +534,12 @@ class RelayTUI:
         self._running = False
 
     def _focused_field_key(self) -> Optional[str]:
-        """The symbolic key of the currently focused Connect-tab row,
-        or None when the cursor doesn't apply to the current view."""
-        if self._view != "connect":
+        """The symbolic key of the currently focused row on whichever
+        tab supports cursor nav (Connect or Runtime), or None when the
+        cursor doesn't apply to the current view (Help / Logs)."""
+        fields = self._active_field_keys()
+        if not fields:
             return None
-        fields = self._connect_field_keys()
         if 0 <= self._field_cursor < len(fields):
             return fields[self._field_cursor]
         return None
@@ -666,92 +688,16 @@ class RelayTUI:
             self._put(stdscr, y, val_col, machine_val, self._bold() | rev_name)
         y += 1
 
-        # Home — editable field
-        focused_home = self._focused_field_key() == "home"
-        rev_home = curses.A_REVERSE if focused_home else 0
-        self._put(stdscr, y, lbl_col, "Home", self._dim() | rev_home)
-        if self._editing_home:
-            # Show input field with cursor
-            field_w = max(30, bar_w - val_col + col)
-            display = self._home_input[:field_w]
-            self._put(stdscr, y, val_col, display, self._bold() | self._cyan())
-            # Blinking cursor
-            cursor_x = val_col + min(self._home_cursor, field_w)
-            if 0 <= cursor_x < w - 1:
-                try:
-                    curses.curs_set(1)
-                    stdscr.move(y, cursor_x)
-                except curses.error:
-                    pass
-            # Hint
-            self._put(stdscr, y + 1, val_col, "Enter to save, Esc to cancel", self._dim())
-            y += 2
-        else:
-            home_val = s.get("home_dir", "\u2014")
-            self._put(stdscr, y, val_col, home_val, self._bold() | rev_home)
-            y += 1
-
-        if s.get("project"):
-            self._put(stdscr, y, lbl_col, "Project", self._dim())
-            self._put(stdscr, y, val_col, s["project"], self._bold())
-            y += 1
-
-        # AI CLI provider
-        providers = s.get("cli_providers", {})
-        default_cli = s.get("default_cli", "claude")
-        default_provider = providers.get(default_cli, {})
-        cli_display = default_provider.get("display_name", default_cli.title())
-        cli_authed = default_provider.get("authenticated", False)
-        focused_cli = self._focused_field_key() == "cli"
-        rev_cli = curses.A_REVERSE if focused_cli else 0
-        self._put(stdscr, y, lbl_col, "AI CLI", self._dim() | rev_cli)
-        self._put(stdscr, y, val_col, cli_display, self._bold() | rev_cli)
-        # Auth status dot
-        dot_x = val_col + len(cli_display) + 1
-        if cli_authed:
-            self._put(stdscr, y, dot_x, "\u25cf", self._green())
-        else:
-            self._put(stdscr, y, dot_x, "\u25cb", self._red())
-        y += 1
+        # Home + AI CLI moved to the Runtime tab — they describe HOW
+        # the relay runs work (working directory, default model agent),
+        # which fits Runtime's mandate better than Connect's identity-
+        # and-transport focus.
 
         dashboard_url = s.get("dashboard_url", f"http://localhost:{s['port']}/")
         self._put(stdscr, y, lbl_col, "Dashboard", self._dim())
         self._put(stdscr, y, val_col, dashboard_url, self._bold())
         y += 1
 
-        # TRY — onboarding hints for the /cerver Claude Code skill. Renders
-        # only until the first request lands; after the user is up and running
-        # it auto-hides so STATUS / WORKLOAD / COMPUTE get the screen back.
-        # Tight 4 rows + header so the section doesn't overflow short terminals.
-        if s.get("requests_handled", 0) == 0:
-            y += 1
-            self._put(stdscr, y, lbl_col, "TRY", self._dim())
-            self._put(
-                stdscr, y, lbl_col + 4,
-                "(in Claude Code — the /cerver skill is installed)",
-                self._dim(),
-            )
-            y += 1
-            self._hline(stdscr, y, col, bar_w)
-            y += 1
-            # Wider command column so descriptions align cleanly and don't
-            # collide with the longest verb. Right edge guarded against the
-            # actual terminal width `w`, not the narrow `bar_w` hline.
-            cmd_col = lbl_col + 2
-            desc_col = cmd_col + 36  # 36 = len longest cmd ('/cerver move <session> <compute>') + 2 gap
-            tips = (
-                ('/cerver run "<prompt>"',            "send a prompt to this machine"),
-                ('/cerver compare "<prompt>"',        "same prompt → claude + codex"),
-                ('/cerver computes',                   "list your registered computes"),
-                ('/cerver move <session> <compute>',  "move a live session"),
-                ('/cerver help',                       "all verbs"),
-            )
-            for cmd, desc in tips:
-                self._put(stdscr, y, lbl_col, "▸", self._dim())
-                self._put(stdscr, y, cmd_col, cmd, self._bold())
-                if desc_col + len(desc) < w - 1:
-                    self._put(stdscr, y, desc_col, desc, self._dim())
-                y += 1
 
         y += 1
         self._put(stdscr, y, lbl_col, "STATUS", self._dim())
@@ -900,6 +846,41 @@ class RelayTUI:
         # Footer — tab nav first, then connect-specific actions.
         if not self._editing_home:
             curses.curs_set(0)
+
+        # TRY — onboarding hints for the /cerver Claude Code skill. Renders
+        # only until the first request lands; after the user is up and running
+        # it auto-hides so STATUS / WORKLOAD / COMPUTE get the screen back.
+        # Tight 4 rows + header so the section doesn't overflow short terminals.
+        if s.get("requests_handled", 0) == 0:
+            y += 1
+            self._put(stdscr, y, lbl_col, "TRY", self._dim())
+            self._put(
+                stdscr, y, lbl_col + 4,
+                "(in Claude Code — the /cerver skill is installed)",
+                self._dim(),
+            )
+            y += 1
+            self._hline(stdscr, y, col, bar_w)
+            y += 1
+            # Wider command column so descriptions align cleanly and don't
+            # collide with the longest verb. Right edge guarded against the
+            # actual terminal width `w`, not the narrow `bar_w` hline.
+            cmd_col = lbl_col + 2
+            desc_col = cmd_col + 36  # 36 = len longest cmd ('/cerver move <session> <compute>') + 2 gap
+            tips = (
+                ('/cerver run "<prompt>"',            "send a prompt to this machine"),
+                ('/cerver compare "<prompt>"',        "same prompt → claude + codex"),
+                ('/cerver computes',                   "list your registered computes"),
+                ('/cerver move <session> <compute>',  "move a live session"),
+                ('/cerver help',                       "all verbs"),
+            )
+            for cmd, desc in tips:
+                self._put(stdscr, y, lbl_col, "▸", self._dim())
+                self._put(stdscr, y, cmd_col, cmd, self._bold())
+                if desc_col + len(desc) < w - 1:
+                    self._put(stdscr, y, desc_col, desc, self._dim())
+                y += 1
+
         self._draw_tab_footer(stdscr, h, w, col, lbl_col, bar_w, current="connect")
 
     # ── runtime view ─────────────────────────────────────────────────
@@ -944,18 +925,52 @@ class RelayTUI:
             self._hline(stdscr, y, col, bar_w)
             y += 2
 
-        # Identity-lite — just enough to confirm which compute you're
-        # looking at without duplicating the full block from Connect.
+        # Identity-lite — machine name is shown as a header anchor so
+        # you know which compute you're configuring. The editable rows
+        # follow: Home (where work runs) + AI CLI (what runs it). Both
+        # focusable via Up/Down/Enter — same nav model as Connect.
         if s.get("machine_name"):
             self._put(stdscr, y, lbl_col, "Machine", self._dim())
             self._put(stdscr, y, val_col, s["machine_name"], self._bold())
             y += 1
+
+        # Home — editable working directory for this relay.
+        focused_home = self._focused_field_key() == "home"
+        rev_home = curses.A_REVERSE if focused_home else 0
+        self._put(stdscr, y, lbl_col, "Home", self._dim() | rev_home)
+        if self._editing_home:
+            field_w = max(30, bar_w - val_col + col)
+            display = self._home_input[:field_w]
+            self._put(stdscr, y, val_col, display, self._bold() | self._cyan())
+            cursor_x = val_col + min(self._home_cursor, field_w)
+            if 0 <= cursor_x < w - 1:
+                try:
+                    curses.curs_set(1)
+                    stdscr.move(y, cursor_x)
+                except curses.error:
+                    pass
+            self._put(stdscr, y + 1, val_col, "Enter to save, Esc to cancel", self._dim())
+            y += 2
+        else:
+            home_val = s.get("home_dir", "—")
+            self._put(stdscr, y, val_col, home_val, self._bold() | rev_home)
+            y += 1
+
+        # AI CLI — default provider for `cerver run` / `cerver compare`.
         providers = s.get("cli_providers", {})
         default_cli = s.get("default_cli", "claude")
         default_provider = providers.get(default_cli, {})
         cli_display = default_provider.get("display_name", default_cli.title())
-        self._put(stdscr, y, lbl_col, "AI CLI", self._dim())
-        self._put(stdscr, y, val_col, cli_display, self._bold())
+        cli_authed = default_provider.get("authenticated", False)
+        focused_cli = self._focused_field_key() == "cli"
+        rev_cli = curses.A_REVERSE if focused_cli else 0
+        self._put(stdscr, y, lbl_col, "AI CLI", self._dim() | rev_cli)
+        self._put(stdscr, y, val_col, cli_display, self._bold() | rev_cli)
+        dot_x = val_col + len(cli_display) + 1
+        if cli_authed:
+            self._put(stdscr, y, dot_x, "●", self._green() | rev_cli)
+        else:
+            self._put(stdscr, y, dot_x, "○", self._red() | rev_cli)
         y += 2
 
         # Workload
@@ -1231,16 +1246,20 @@ class RelayTUI:
         self._hline(stdscr, footer_y - 1, col, bar_w)
         x = lbl_col
 
-        # Tab nav. Active tab is bracketed and green-bold so it pops at
-        # a glance; inactive tabs are dim. ←→ also cycle between tabs
-        # (handler routes those into the matching _view assignment).
-        # Logs is a peer tab now — [L] still works as a shortcut but
-        # arrow nav reaches it too, so it gets a slot in the strip.
+        # Tab nav. Active tab uses inverse-video (A_REVERSE) so it
+        # matches the row-highlight style used inside the panels —
+        # consistent affordance for "this is the selected item." ←→
+        # also cycles (handler routes those into the matching _view
+        # assignment). Logs is a peer tab now — [L] still works as a
+        # shortcut but arrow nav reaches it too.
         for key_label, view_name, display in (("[1]", "connect", "Connect"), ("[2]", "runtime", "Runtime"), ("[3]", "help", "Help"), ("[4]", "logs", "Logs")):
             self._put(stdscr, footer_y, x, key_label, self._cyan() | self._bold())
             is_active = (current == view_name)
-            label = f"[{display}]" if is_active else display
-            attr = (self._green() | self._bold()) if is_active else self._dim()
+            if is_active:
+                attr = self._bold() | curses.A_REVERSE
+            else:
+                attr = self._dim()
+            label = f" {display} " if is_active else display
             self._put(stdscr, footer_y, x + 4, label, attr)
             x += 4 + len(label) + 2
 
@@ -1252,12 +1271,11 @@ class RelayTUI:
         self._put(stdscr, footer_y, x + 4, "Verbose", self._dim())
         x += 13
 
-        if current == "connect":
-            # Connect tab has actionable rows now navigated by Up/Down
-            # + Enter — the old per-row letter shortcuts ([N]/[H]/[S]/
-            # [C]/[D]) still work as keybindings, but they don't need
-            # to crowd the footer anymore. One contextual hint replaces
-            # the row of letters.
+        if current in ("connect", "runtime"):
+            # Both Connect (Machine / Startup / Logout) and Runtime
+            # (Home / AI CLI) have focusable rows navigated by Up/Down
+            # + Enter. Letter shortcuts ([N]/[H]/[S]/[C]/[D]) still work
+            # but the footer just shows the canonical nav now.
             self._put(stdscr, footer_y, x, "[↑↓]", self._cyan() | self._bold())
             self._put(stdscr, footer_y, x + 5, "Select", self._dim())
             x += 13
