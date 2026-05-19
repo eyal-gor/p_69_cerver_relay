@@ -239,7 +239,7 @@ class RelayTUI:
             now = time.monotonic()
             # Animated logo wants 10fps redraws on tabs that show it;
             # Help is static so it falls back to the slower REFRESH_MS.
-            interval = ANIM_INTERVAL if self._view in ("connect", "runtime") else self.REFRESH_MS / 1000.0
+            interval = ANIM_INTERVAL if self._view in ("connect", "provision", "runtime") else self.REFRESH_MS / 1000.0
             if now - last_draw >= interval:
                 self._anim_frame += 1
                 try:
@@ -247,6 +247,8 @@ class RelayTUI:
                     h, w = stdscr.getmaxyx()
                     if self._view == "connect":
                         self._draw_connect(stdscr, h, w)
+                    elif self._view == "provision":
+                        self._draw_provision(stdscr, h, w)
                     elif self._view == "runtime":
                         self._draw_runtime(stdscr, h, w)
                     elif self._view == "help":
@@ -364,7 +366,7 @@ class RelayTUI:
             if self._view == "logs":
                 self._view = self._last_main_view
             else:
-                if self._view in ("connect", "runtime", "help"):
+                if self._view in ("connect", "provision", "runtime", "help"):
                     self._last_main_view = self._view
                 self._view = "logs"
                 self._scroll_offset = 0
@@ -377,21 +379,27 @@ class RelayTUI:
                 self._last_main_view = "connect"
                 self._field_cursor = 0
         elif key == ord("2"):
+            # Direct nav: Provision tab (cerver-side compute identity).
+            if self._view != "provision":
+                self._view = "provision"
+                self._last_main_view = "provision"
+                self._field_cursor = 0
+        elif key == ord("3"):
             # Direct nav: Runtime tab.
             if self._view != "runtime":
                 self._view = "runtime"
                 self._last_main_view = "runtime"
                 self._field_cursor = 0
-        elif key == ord("3"):
+        elif key == ord("4"):
             # Direct nav: Help tab. Static reference page — no live
             # state, so refresh interval falls back to slow.
             if self._view != "help":
                 self._view = "help"
                 self._last_main_view = "help"
                 self._field_cursor = 0
-        elif key == ord("4"):
+        elif key == ord("5"):
             # Direct nav: Logs tab. Mirrors the [L] toggle's enter path,
-            # without the back-toggle behavior — [4] always lands you on
+            # without the back-toggle behavior — [5] always lands you on
             # logs even if you were already there.
             if self._view != "logs":
                 self._view = "logs"
@@ -449,11 +457,12 @@ class RelayTUI:
                 }.get(key_name)
                 if handler:
                     handler()
-        elif key in (curses.KEY_LEFT, curses.KEY_RIGHT) and self._view in ("connect", "runtime", "help", "logs"):
-            # ←/→ cycles forward/backward through the four main tabs.
-            # Logs is now a peer tab rather than a sub-view — [L] still
-            # works as a shortcut, but arrow nav reaches it too.
-            order = ["connect", "runtime", "help", "logs"]
+        elif key in (curses.KEY_LEFT, curses.KEY_RIGHT) and self._view in ("connect", "provision", "runtime", "help", "logs"):
+            # ←/→ cycles forward/backward through the five main tabs.
+            # Provision sits between Connect (machine identity) and
+            # Runtime (workload): it covers cerver-side compute identity
+            # (the full compute_id, label, gateway connection, etc).
+            order = ["connect", "provision", "runtime", "help", "logs"]
             i = order.index(self._view)
             step = -1 if key == curses.KEY_LEFT else 1
             self._view = order[(i + step) % len(order)]
@@ -942,6 +951,139 @@ class RelayTUI:
 
         self._draw_tab_footer(stdscr, h, w, col, lbl_col, bar_w, current="connect")
 
+    # ── provision view ───────────────────────────────────────────────
+    # Cerver-side compute identity: the full compute_id (which is what
+    # other tools — kompany, the dashboard, `cerver computes` — use to
+    # reference this machine), the human label, the provider type, and
+    # the gateway connection state. Read-only — provisioning state is
+    # managed by the gateway, not by the user typing into this panel.
+
+    def _draw_provision(self, stdscr, h, w):
+        s = self.state
+        col = 2
+        lbl_col = 4
+        val_col = 20
+        bar_w = min(80, w - 4)
+        y = 1
+
+        # Header — same animated logo treatment as Connect/Runtime.
+        ver = f"v{s['version']}" if s["version"] else ""
+        subtitle_text = "Cerver Provision"
+        if w >= LOGO_WIDTH + 6:
+            self._draw_animated_logo(stdscr, y, col)
+            y += LOGO_HEIGHT
+            self._put(stdscr, y, col + LOGO_WIDTH - len(subtitle_text), subtitle_text, self._bold() | self._green())
+            if ver:
+                self._put(stdscr, y + 1, col + LOGO_WIDTH - len(ver), ver, self._dim())
+                y += 2
+            else:
+                y += 1
+            self._hline(stdscr, y, col, bar_w)
+            y += 2
+        else:
+            self._put(stdscr, y, col, subtitle_text, self._bold() | self._green())
+            y += 1
+            if ver:
+                self._put(stdscr, y, col, ver, self._dim())
+                y += 1
+            self._hline(stdscr, y, col, bar_w)
+            y += 2
+
+        # COMPUTE section — the identity the gateway sees.
+        self._put(stdscr, y, lbl_col, "COMPUTE", self._dim())
+        y += 1
+        self._hline(stdscr, y, col, bar_w)
+        y += 1
+
+        cerver_compute_id = s.get("cerver_compute_id")
+        cerver_compute_label = s.get("cerver_compute_label") or s.get("machine_name")
+        # Full compute_id, not truncated — that's the whole point of
+        # this view. If we're still registering, surface the in-flight
+        # state instead of a fake id.
+        self._put(stdscr, y, lbl_col, "Compute ID", self._dim())
+        if isinstance(cerver_compute_id, str) and cerver_compute_id and not cerver_compute_id.startswith("error:"):
+            self._put(stdscr, y, val_col, cerver_compute_id, self._bold() | self._cyan())
+        elif isinstance(cerver_compute_id, str) and cerver_compute_id.startswith("error:"):
+            self._put(stdscr, y, val_col, cerver_compute_id, self._red() | self._bold())
+        else:
+            self._put(stdscr, y, val_col, "Registering…", self._yellow())
+        y += 1
+
+        self._put(stdscr, y, lbl_col, "Label", self._dim())
+        self._put(stdscr, y, val_col, cerver_compute_label or "—", self._bold())
+        y += 1
+
+        # Provider: where this compute physically lives. For local-relay
+        # mounts it's always "cerver_local_provider"; managed providers
+        # (vercel / e2b / modal / cloudflare) get their own value once
+        # the relay supports them as Provision targets.
+        provider = s.get("cerver_compute_provider") or "cerver_local_provider"
+        self._put(stdscr, y, lbl_col, "Provider", self._dim())
+        self._put(stdscr, y, val_col, provider, self._bold())
+        y += 1
+
+        if s.get("user_email"):
+            self._put(stdscr, y, lbl_col, "Owner", self._dim())
+            self._put(stdscr, y, val_col, s["user_email"], self._bold())
+            y += 1
+
+        y += 1
+
+        # GATEWAY section — the transport to cerver.
+        self._put(stdscr, y, lbl_col, "GATEWAY", self._dim())
+        y += 1
+        self._hline(stdscr, y, col, bar_w)
+        y += 1
+
+        cerver_status = s.get("cerver_status", "idle")
+        cerver_url = s.get("cerver_url") or "gateway.cerver.ai"
+        self._put(stdscr, y, lbl_col, "Status", self._dim())
+        if cerver_status == "connected":
+            self._put(stdscr, y, val_col, "●", self._green() | self._bold())
+            self._put(stdscr, y, val_col + 2, f"Connected  ·  {cerver_url}")
+        elif cerver_status == "connecting":
+            self._put(stdscr, y, val_col, "●", self._yellow() | self._bold())
+            self._put(stdscr, y, val_col + 2, f"Connecting…  ·  {cerver_url}")
+        elif isinstance(cerver_compute_id, str) and cerver_compute_id.startswith("error:"):
+            self._put(stdscr, y, val_col, "●", self._red() | self._bold())
+            self._put(stdscr, y, val_col + 2, "Registration failed")
+        else:
+            self._put(stdscr, y, val_col, "●", self._yellow() | self._bold())
+            self._put(stdscr, y, val_col + 2, f"Waiting…  ·  {cerver_url}")
+        y += 1
+
+        # Heartbeat — last keepalive received from the gateway's connect
+        # channel. A stale heartbeat is the earliest sign of a dropped
+        # transport before the status flag flips.
+        self._put(stdscr, y, lbl_col, "Heartbeat", self._dim())
+        hb = s.get("cerver_last_heartbeat")
+        if hb:
+            ago = int((datetime.now(timezone.utc) - hb).total_seconds())
+            if ago < 60:
+                self._put(stdscr, y, val_col, "●", self._green() | self._bold())
+                self._put(stdscr, y, val_col + 2, f"OK  {ago}s ago")
+            else:
+                self._put(stdscr, y, val_col, "●", self._yellow() | self._bold())
+                self._put(stdscr, y, val_col + 2, f"Stale  {ago}s ago")
+        elif s.get("cerver_status") == "connected":
+            self._put(stdscr, y, val_col, "●", self._yellow() | self._bold())
+            self._put(stdscr, y, val_col + 2, "Waiting…")
+        else:
+            self._put(stdscr, y, val_col, "●", self._dim())
+            self._put(stdscr, y, val_col + 2, "—")
+        y += 1
+
+        rc = s.get("reconnect_count", 0)
+        self._put(stdscr, y, lbl_col, "Reconnects", self._dim())
+        self._put(stdscr, y, val_col, str(rc), self._green() if rc == 0 else self._yellow())
+        y += 1
+
+        self._put(stdscr, y, lbl_col, "Uptime", self._dim())
+        self._put(stdscr, y, val_col, self._format_uptime())
+        y += 1
+
+        self._draw_tab_footer(stdscr, h, w, col, lbl_col, bar_w, current="provision")
+
     # ── runtime view ─────────────────────────────────────────────────
     # Workload (agents, workflows, requests) and the underlying compute
     # resources (CPU / memory / load / disk). Sibling of Connect; shares
@@ -984,14 +1126,9 @@ class RelayTUI:
             self._hline(stdscr, y, col, bar_w)
             y += 2
 
-        # Identity-lite — machine name is shown as a header anchor so
-        # you know which compute you're configuring. The editable rows
-        # follow: Home (where work runs) + AI CLI (what runs it). Both
-        # focusable via Up/Down/Enter — same nav model as Connect.
-        if s.get("machine_name"):
-            self._put(stdscr, y, lbl_col, "Machine", self._dim())
-            self._put(stdscr, y, val_col, s["machine_name"], self._bold())
-            y += 1
+        # Machine identity moved to the Provision tab — Runtime is just
+        # the work-side config now: Home (where it runs) and AI CLI
+        # (what runs it), both focusable via Up/Down/Enter.
 
         # Home — editable working directory for this relay.
         focused_home = self._focused_field_key() == "home"
@@ -1278,9 +1415,9 @@ class RelayTUI:
 
         # ── TUI keybindings ─────────────────────────────────────
         if section("KEYBINDINGS"):
-            row("[1] / [2] / [3] / [4]", "Connect / Runtime / Help / Logs")
+            row("[1] / [2] / [3] / [4] / [5]", "Connect / Provision / Runtime / Help / Logs")
             row("← / →", "cycle tabs")
-            row("[L]", "logs (toggle, same as [4])")
+            row("[L]", "logs (toggle, same as [5])")
             row("[V]", "verbose mode on this tab")
             row("[Q]", "quit")
             blank()
@@ -1317,7 +1454,7 @@ class RelayTUI:
         # also cycles (handler routes those into the matching _view
         # assignment). Logs is a peer tab now — [L] still works as a
         # shortcut but arrow nav reaches it too.
-        for key_label, view_name, display in (("[1]", "connect", "Connect"), ("[2]", "runtime", "Runtime"), ("[3]", "help", "Help"), ("[4]", "logs", "Logs")):
+        for key_label, view_name, display in (("[1]", "connect", "Connect"), ("[2]", "provision", "Provision"), ("[3]", "runtime", "Runtime"), ("[4]", "help", "Help"), ("[5]", "logs", "Logs")):
             self._put(stdscr, footer_y, x, key_label, self._cyan() | self._bold())
             is_active = (current == view_name)
             if is_active:
