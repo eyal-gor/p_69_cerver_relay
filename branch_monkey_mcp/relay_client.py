@@ -1320,7 +1320,13 @@ class RelayClient:
                     # but the channel is in fact down. _start_cerver_…
                     # is idempotent when the task is healthy.
                     task_done = not self._cerver_connect_task or self._cerver_connect_task.done()
-                    not_connected = self.state.get("cerver_status") != "connected"
+                    # State lives on the TUI; in --no-tui runs we have no
+                    # local mirror, so skip the not-connected branch
+                    # (the task-alive check above still catches real death).
+                    not_connected = (
+                        self.tui is not None
+                        and self.tui.state.get("cerver_status") != "connected"
+                    )
                     if task_done:
                         await self._start_cerver_connect_transport()
                     elif not_connected:
