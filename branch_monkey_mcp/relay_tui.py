@@ -1945,32 +1945,6 @@ class RelayTUI:
         self._put(stdscr, footer_y, x + 3, "Switch", self._dim())
         x += 11
 
-        if current == "provision":
-            self._put(stdscr, footer_y, x, "[↑↓]", self._cyan() | self._bold())
-            self._put(stdscr, footer_y, x + 5, "Select", self._dim())
-            x += 13
-            self._put(stdscr, footer_y, x, "[Shift+↑↓]", self._cyan() | self._bold())
-            self._put(stdscr, footer_y, x + 11, "Scroll", self._dim())
-            x += 20
-            self._put(stdscr, footer_y, x, "[S]", self._cyan() | self._bold())
-            self._put(stdscr, footer_y, x + 4, "Startup", self._dim())
-            x += 13
-        elif current == "network":
-            self._put(stdscr, footer_y, x, "[↑↓]", self._cyan() | self._bold())
-            self._put(stdscr, footer_y, x + 5, "Scroll", self._dim())
-            x += 13
-        elif current in ("connect", "runtime"):
-            # Both Connect (Machine / Startup / Logout) and Runtime
-            # (Home / AI CLI) have focusable rows navigated by Up/Down
-            # + Enter. Letter shortcuts ([N]/[H]/[S]/[C]/[D]) still work
-            # but the footer just shows the canonical nav now.
-            self._put(stdscr, footer_y, x, "[↑↓]", self._cyan() | self._bold())
-            self._put(stdscr, footer_y, x + 5, "Select", self._dim())
-            x += 13
-            self._put(stdscr, footer_y, x, "[Enter]", self._cyan() | self._bold())
-            self._put(stdscr, footer_y, x + 8, "Edit", self._dim())
-            x += 14
-
     def _draw_animated_logo(self, stdscr, y, col):
         """Draw the logo as a rain-on-water surface. Random raindrops
         spawn at impact points and ripple outward; spawn rate scales with
