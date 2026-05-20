@@ -161,6 +161,35 @@ PERSISTENT_CONFIG_FILE = CONFIG_DIR / "config.json"
 # launch, see _bootstrap_cerver_credentials) writes this file.
 CERVER_DIR = Path.home() / ".cerver"
 CERVER_INFISICAL_ENV = CERVER_DIR / "infisical.env"
+# install.sh writes the user's account token here as CERVER_API_KEY.
+# Launchd's plist doesn't source env files, so the relay has to read it
+# directly — otherwise `--cerver-only` starts a fresh device-auth flow
+# (pops /approve?code=… in the browser) on every respawn.
+CERVER_ACCOUNT_ENV = CERVER_DIR / "cerver.env"
+
+
+def _load_cerver_api_token() -> Optional[str]:
+    """Read the cerver account token from ~/.cerver/cerver.env.
+
+    Accepts both CERVER_API_TOKEN (historical name the relay reads from
+    os.environ) and CERVER_API_KEY (what install.sh writes today). Returns
+    None if the file is absent, unreadable, or contains neither key.
+    """
+    if not CERVER_ACCOUNT_ENV.exists():
+        return None
+    try:
+        for line in CERVER_ACCOUNT_ENV.read_text().splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            if k.strip() in ("CERVER_API_TOKEN", "CERVER_API_KEY"):
+                val = v.strip().strip('"').strip("'")
+                if val:
+                    return val
+    except Exception as e:
+        print(f"[Relay] Warning: failed to read {CERVER_ACCOUNT_ENV}: {e}")
+    return None
 
 # Cloud API URL - fallback if /api/config fetch fails
 FALLBACK_CLOUD_URL = "https://kompany.dev"
@@ -270,7 +299,12 @@ class RelayClient:
             pass
         self.cerver_url = cerver_url or os.environ.get("CERVER_GATEWAY_URL")
         self.cerver_owner_id = cerver_owner_id or os.environ.get("CERVER_OWNER_ID")
-        self.cerver_api_token = cerver_api_token or os.environ.get("CERVER_API_TOKEN")
+        self.cerver_api_token = (
+            cerver_api_token
+            or os.environ.get("CERVER_API_TOKEN")
+            or os.environ.get("CERVER_API_KEY")
+            or _load_cerver_api_token()
+        )
 
         # Auth data
         self.access_token: Optional[str] = None
@@ -1539,6 +1573,13 @@ class RelayClient:
 
         self._running = True
         self._tui_update(cerver_only=True)
+
+        # Cerver-only launches skip Kompany auth, but they still need the
+        # account token from Infisical. Without this bootstrap the relay falls
+        # back to device auth and registration can fail before the compute ever
+        # appears in the dashboard.
+        await self._bootstrap_cerver_credentials()
+
         await self._register_cerver_compute()
         self._cerver_heartbeat_task = asyncio.create_task(self._cerver_heartbeat_loop())
         self._cerver_network_task = asyncio.create_task(self._cerver_network_loop())
