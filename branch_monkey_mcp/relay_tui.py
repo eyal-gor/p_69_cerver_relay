@@ -1220,62 +1220,6 @@ class RelayTUI:
             y += 1
 
         y += 1
-
-        # GATEWAY section — the transport to cerver.
-        self._put(stdscr, y, lbl_col, "GATEWAY", self._dim())
-        y += 1
-        self._hline(stdscr, y, col, bar_w)
-        y += 1
-
-        cerver_status = s.get("cerver_status", "idle")
-        cerver_url = s.get("cerver_url") or "gateway.cerver.ai"
-        self._put(stdscr, y, lbl_col, "Status", self._dim())
-        if cerver_status == "connected":
-            self._put(stdscr, y, val_col, "●", self._green() | self._bold())
-            self._put(stdscr, y, val_col + 2, f"Connected  ·  {cerver_url}")
-        elif cerver_status == "connecting":
-            self._put(stdscr, y, val_col, "●", self._yellow() | self._bold())
-            self._put(stdscr, y, val_col + 2, f"Connecting…  ·  {cerver_url}")
-        elif isinstance(cerver_compute_id, str) and cerver_compute_id.startswith("error:"):
-            self._put(stdscr, y, val_col, "●", self._red() | self._bold())
-            self._put(stdscr, y, val_col + 2, "Registration failed")
-        else:
-            self._put(stdscr, y, val_col, "●", self._yellow() | self._bold())
-            self._put(stdscr, y, val_col + 2, f"Waiting…  ·  {cerver_url}")
-        y += 1
-
-        # Heartbeat — last keepalive received from the gateway's connect
-        # channel. A stale heartbeat is the earliest sign of a dropped
-        # transport before the status flag flips.
-        self._put(stdscr, y, lbl_col, "Heartbeat", self._dim())
-        hb = s.get("cerver_last_heartbeat")
-        if hb:
-            ago = int((datetime.now(timezone.utc) - hb).total_seconds())
-            if ago < 60:
-                self._put(stdscr, y, val_col, "●", self._green() | self._bold())
-                self._put(stdscr, y, val_col + 2, f"OK  {ago}s ago")
-            else:
-                self._put(stdscr, y, val_col, "●", self._yellow() | self._bold())
-                self._put(stdscr, y, val_col + 2, f"Stale  {ago}s ago")
-        elif s.get("cerver_status") == "connected":
-            self._put(stdscr, y, val_col, "●", self._yellow() | self._bold())
-            self._put(stdscr, y, val_col + 2, "Waiting…")
-        else:
-            self._put(stdscr, y, val_col, "●", self._dim())
-            self._put(stdscr, y, val_col + 2, "—")
-        y += 1
-
-        rc = s.get("reconnect_count", 0)
-        self._put(stdscr, y, lbl_col, "Reconnects", self._dim())
-        self._put(stdscr, y, val_col, str(rc), self._green() if rc == 0 else self._yellow())
-        y += 1
-
-        self._put(stdscr, y, lbl_col, "Uptime", self._dim())
-        self._put(stdscr, y, val_col, self._format_uptime())
-        y += 1
-
-
-        y += 1
         # Installed — inventory of tools available on this compute. The
         # cerver CLI is probed by filesystem; AI CLIs come from
         # cli_providers populated by relay_client. Auth state surfaces
