@@ -108,10 +108,31 @@ class CerverConnectTransport:
             self._ws = ws
             self._emit_status("connected")
 
+            # Dispatch each gateway request as its own task so a long-
+            # running /run (e.g. claude taking 15s to finish) doesn't
+            # block the WS read loop. With `await _handle_message(raw)`
+            # in the loop, three concurrent /v2/sessions/<id>/input calls
+            # were processed serially — the second + third CLIs sat in
+            # the WS receive buffer until the first finished, and the
+            # upstream gateway/client timed out at 180s before they
+            # were dequeued (the "third CLI never produces output"
+            # symptom from 853eb43). Each handler owns its own
+            # send-response; the websockets library serializes sends on
+            # the underlying connection, so concurrent _send_json calls
+            # are safe.
             async for raw in ws:
-                await self._handle_message(raw)
+                asyncio.create_task(self._handle_message_safely(raw))
 
         self._ws = None
+
+    async def _handle_message_safely(self, raw: str) -> None:
+        try:
+            await self._handle_message(raw)
+        except Exception as exc:
+            # Swallow + log: an exception escaping a fire-and-forget
+            # task becomes a noisy "Task exception was never retrieved"
+            # but doesn't kill the WS loop. Log so we still notice.
+            print(f"[Cerver connect] request handler crashed: {exc}")
 
     async def _handle_message(self, raw: str) -> None:
         try:
