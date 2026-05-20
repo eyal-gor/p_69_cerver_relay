@@ -108,6 +108,11 @@ class RelayTUI:
             "default_cli": "claude",
             "cli_prompt": None,  # None=don't show, "pending"=showing, "done"=answered
             "agent_counts": {},
+            # Per-agent list — populated by the relay's stats poll from
+            # agent_manager.list(). One dict per live agent: id, cli_tool,
+            # status, created_at, last_activity, session_id, etc.
+            # Rendered as the session list on the Runtime tab.
+            "agent_rows": [],
             "workflow_summary": {},
             "compute": {},
             "compute_health": None,
@@ -150,6 +155,11 @@ class RelayTUI:
         # Quit confirmation. Default selection is "No" so a stray Enter
         # press after the modal opens doesn't kill the relay accidentally.
         self._quit_selected = 1  # 0=Yes (quit), 1=No (cancel)
+        # Highlighted row in the Runtime tab's session list. ↑/↓ (or j/k)
+        # while on the Runtime view shifts it. Auto-clamped when the list
+        # changes size (agent finishes, new one starts) so the cursor
+        # doesn't fall off the end.
+        self._runtime_session_idx = 0
         self._on_cli_set = None  # Callback when user selects a CLI provider
         self._cli_selected = 0  # Index into installed providers list
         # CLI auth sub-modes within CLI prompt
@@ -544,9 +554,24 @@ class RelayTUI:
         """Ordered list of focusable field keys on the Runtime tab.
 
         Runtime covers HOW the relay runs work: where (Home) and with
-        what (AI CLI default).
+        what (AI CLI default), plus a row per live agent for the
+        session-list view. Up/Down cycles through everything in one
+        ring, so the user can navigate from "Home" all the way down
+        into "session 3" without learning a second keybinding.
+
+        Session keys are `session_<agent_id>` — the dispatcher table
+        in _handle_key doesn't (yet) have a handler for them, so Enter
+        on a session row is a no-op. That's fine for now; future work
+        will bind Enter to a tail / kill / peek action.
         """
-        return ["home", "cli"]
+        keys = ["home", "cli"]
+        for row in self.state.get("agent_rows") or []:
+            if not isinstance(row, dict):
+                continue
+            aid = row.get("id")
+            if aid:
+                keys.append(f"session_{aid}")
+        return keys
 
     def _provision_field_keys(self) -> list:
         """Ordered list of focusable field keys on the Provision tab.
@@ -1674,6 +1699,68 @@ class RelayTUI:
                 "(local HTTP down — counts read directly from agent manager)",
                 self._dim(),
             )
+            y += 1
+
+        # Per-agent rows — one line each. ↑/↓ on the Runtime tab cycles
+        # through fields ([Home, AI CLI]) and then into these rows;
+        # whichever row is focused renders in inverse video so the user
+        # sees what they'd act on (Enter is not wired to anything yet —
+        # tail/kill/peek is the natural next step).
+        #
+        # session_w is the wider bound for the session list — the
+        # rest of the Runtime tab uses bar_w=50 for the narrow stat
+        # column, but a session row with cli/agent/status/age/detail
+        # needs ~110 cols to read comfortably. We let it expand here
+        # without disturbing the surrounding layout.
+        session_w = min(110, max(50, w - 4))
+        rows = s.get("agent_rows") or []
+        if rows:
+            # Header row, dimmed.
+            self._put(stdscr, y, lbl_col + 2, "CLI", self._dim() | self._bold())
+            self._put(stdscr, y, lbl_col + 12, "AGENT", self._dim() | self._bold())
+            self._put(stdscr, y, lbl_col + 23, "STATUS", self._dim() | self._bold())
+            self._put(stdscr, y, lbl_col + 34, "AGE", self._dim() | self._bold())
+            self._put(stdscr, y, lbl_col + 44, "DETAIL", self._dim() | self._bold())
+            y += 1
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                aid = str(row.get("id") or "")
+                focused = self._focused_field_key() == f"session_{aid}"
+                rev = curses.A_REVERSE if focused else 0
+                status = str(row.get("status") or "?")
+                cli = str(row.get("cli_tool") or "—")
+                # Status dot color so a glance tells you who's actively
+                # working vs idle vs broken.
+                status_color = {
+                    "running": self._green() | self._bold(),
+                    "paused":  self._cyan(),
+                    "ready":   self._yellow(),
+                    "prepared": self._dim(),
+                    "completed": self._dim(),
+                    "failed":  self._red() | self._bold(),
+                    "stopped": self._dim(),
+                }.get(status, self._dim())
+                self._put(stdscr, y, lbl_col, "●", status_color | rev)
+                self._put(stdscr, y, lbl_col + 2, cli[:8], self._bold() | rev)
+                self._put(stdscr, y, lbl_col + 12, aid[:10], self._dim() | rev)
+                self._put(stdscr, y, lbl_col + 23, status[:10], rev)
+                age = self._format_relative_time(row.get("created_at"))
+                self._put(stdscr, y, lbl_col + 34, age[:10], self._dim() | rev)
+                # DETAIL: session_id short form (so the user can
+                # cross-reference with `cerver sessions`) plus a tiny
+                # idle-since for paused/ready rows. Truncate to fit.
+                sid = str(row.get("session_id") or "")
+                detail_parts = []
+                if sid:
+                    detail_parts.append(f"sid:{sid[:8]}")
+                if status in ("paused", "ready"):
+                    idle = self._format_relative_time(row.get("last_activity"))
+                    detail_parts.append(f"idle {idle}")
+                detail = "  ·  ".join(detail_parts)
+                detail_w = max(0, session_w - (lbl_col + 44))
+                self._put(stdscr, y, lbl_col + 44, detail[:detail_w], self._dim() | rev)
+                y += 1
             y += 1
 
         workflow_counts = (s.get("workflow_summary") or {}).get("counts", {})

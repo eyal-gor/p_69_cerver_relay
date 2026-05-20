@@ -1664,6 +1664,12 @@ class RelayClient:
                     agent_counts=data.get("agent_counts", {}),
                     workflow_summary=data.get("workflow_summary", {}),
                     compute=data.get("compute", {}),
+                    # Full per-agent list — used by the Runtime tab's
+                    # session-list view (one row per live agent, arrow-
+                    # nav between them). Same shape as agent_manager.list()
+                    # returns: dicts with id, cli_tool, status, created_at,
+                    # last_activity, session_id, …
+                    agent_rows=list(data.get("agents") or []),
                 )
             except asyncio.CancelledError:
                 break
@@ -1677,13 +1683,16 @@ class RelayClient:
                 # the stats endpoint was unreachable — completely misleading
                 # when the manager was actively handling sessions.
                 fallback_counts: Dict[str, int] = {}
+                fallback_rows: List[Dict[str, Any]] = []
                 try:
                     from .bridge_and_local_actions.agent_manager import agent_manager as _mgr
                     for a in _mgr.list():
-                        status = a.get("status") if isinstance(a, dict) else None
-                        if not status:
+                        if not isinstance(a, dict):
                             continue
-                        fallback_counts[status] = fallback_counts.get(status, 0) + 1
+                        status = a.get("status")
+                        if status:
+                            fallback_counts[status] = fallback_counts.get(status, 0) + 1
+                        fallback_rows.append(a)
                 except Exception:
                     pass
                 try:
@@ -1701,9 +1710,14 @@ class RelayClient:
                         server_running=False,
                         compute=fallback_compute,
                         agent_counts=fallback_counts,
+                        agent_rows=fallback_rows,
                     )
                 except Exception:
-                    self._tui_update(server_running=False, agent_counts=fallback_counts)
+                    self._tui_update(
+                        server_running=False,
+                        agent_counts=fallback_counts,
+                        agent_rows=fallback_rows,
+                    )
 
     async def _unregister_machine(self):
         """Mark compute node as offline."""
