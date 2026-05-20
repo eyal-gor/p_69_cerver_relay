@@ -1945,10 +1945,6 @@ class RelayTUI:
         self._put(stdscr, footer_y, x + 3, "Switch", self._dim())
         x += 11
 
-        self._put(stdscr, footer_y, x, "[V]", self._cyan() | self._bold())
-        self._put(stdscr, footer_y, x + 4, "Verbose", self._dim())
-        x += 13
-
         if current == "provision":
             self._put(stdscr, footer_y, x, "[↑↓]", self._cyan() | self._bold())
             self._put(stdscr, footer_y, x + 5, "Select", self._dim())
@@ -1974,9 +1970,6 @@ class RelayTUI:
             self._put(stdscr, footer_y, x, "[Enter]", self._cyan() | self._bold())
             self._put(stdscr, footer_y, x + 8, "Edit", self._dim())
             x += 14
-
-        self._put(stdscr, footer_y, x, "[Q]", self._cyan() | self._bold())
-        self._put(stdscr, footer_y, x + 4, "Quit", self._dim())
 
     def _draw_animated_logo(self, stdscr, y, col):
         """Draw the logo as a rain-on-water surface. Random raindrops
