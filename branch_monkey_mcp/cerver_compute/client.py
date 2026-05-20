@@ -319,6 +319,35 @@ class CerverComputeClient:
         response.raise_for_status()
         return response.json()
 
+    async def list_sessions(self, limit: int = 20) -> Dict[str, Any]:
+        """Return recent Cerver sessions for the authenticated account.
+
+        The gateway returns transcript-light summaries, so this is safe to
+        poll from the relay TUI. Runtime filters these rows to this compute.
+        """
+        if not self.api_token and not self.owner_id:
+            await self.ensure_authenticated()
+
+        params = {"limit": str(max(1, min(limit, 50)))}
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.get(
+                f"{self.cerver_url}/v2/sessions",
+                headers=self._headers(),
+                params=params,
+            )
+        if response.status_code == 401 and self.api_token:
+            print("[Cerver] Saved token rejected (401) — re-running browser login")
+            self._clear_persisted_auth()
+            await self.ensure_authenticated()
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                response = await client.get(
+                    f"{self.cerver_url}/v2/sessions",
+                    headers=self._headers(),
+                    params=params,
+                )
+        response.raise_for_status()
+        return response.json()
+
     async def unregister(self) -> None:
         if not self.compute_id:
             return

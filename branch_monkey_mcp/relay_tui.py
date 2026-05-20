@@ -113,6 +113,10 @@ class RelayTUI:
             # status, created_at, last_activity, session_id, etc.
             # Rendered as the session list on the Runtime tab.
             "agent_rows": [],
+            # Recent Cerver session summaries for this compute. These are
+            # gateway records, not just in-memory local agents, so the Runtime
+            # tab can show ready/idle sessions after the local agent exits.
+            "cerver_session_rows": [],
             "workflow_summary": {},
             "compute": {},
             "compute_health": None,
@@ -571,6 +575,12 @@ class RelayTUI:
             aid = row.get("id")
             if aid:
                 keys.append(f"session_{aid}")
+        for row in self.state.get("cerver_session_rows") or []:
+            if not isinstance(row, dict):
+                continue
+            sid = row.get("sessionId") or row.get("session_id")
+            if sid:
+                keys.append(f"cerver_session_{sid}")
         return keys
 
     def _provision_field_keys(self) -> list:
@@ -1716,6 +1726,8 @@ class RelayTUI:
         rows = s.get("agent_rows") or []
         if rows:
             # Header row, dimmed.
+            self._put(stdscr, y, lbl_col, "Local agents", self._dim())
+            y += 1
             self._put(stdscr, y, lbl_col + 2, "CLI", self._dim() | self._bold())
             self._put(stdscr, y, lbl_col + 12, "AGENT", self._dim() | self._bold())
             self._put(stdscr, y, lbl_col + 23, "STATUS", self._dim() | self._bold())
@@ -1762,6 +1774,51 @@ class RelayTUI:
                 self._put(stdscr, y, lbl_col + 44, detail[:detail_w], self._dim() | rev)
                 y += 1
             y += 1
+        else:
+            self._put(stdscr, y, lbl_col, "Local agents", self._dim())
+            self._put(stdscr, y, val_col, "none running on this relay", self._dim())
+            y += 2
+
+        cerver_rows = s.get("cerver_session_rows") or []
+        self._put(stdscr, y, lbl_col, "Cerver sessions", self._dim())
+        y += 1
+        if cerver_rows:
+            self._put(stdscr, y, lbl_col + 2, "CLI", self._dim() | self._bold())
+            self._put(stdscr, y, lbl_col + 12, "SESSION", self._dim() | self._bold())
+            self._put(stdscr, y, lbl_col + 25, "STATUS", self._dim() | self._bold())
+            self._put(stdscr, y, lbl_col + 36, "UPDATED", self._dim() | self._bold())
+            self._put(stdscr, y, lbl_col + 48, "NAME", self._dim() | self._bold())
+            y += 1
+            for row in cerver_rows:
+                if y >= h - 8 or not isinstance(row, dict):
+                    break
+                sid = str(row.get("sessionId") or row.get("session_id") or "")
+                focused = self._focused_field_key() == f"cerver_session_{sid}"
+                rev = curses.A_REVERSE if focused else 0
+                metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+                cli = str(metadata.get("cli_tool") or row.get("harness") or "—")
+                status = str(row.get("status") or "?")
+                status_color = {
+                    "running": self._green() | self._bold(),
+                    "ready": self._yellow(),
+                    "idle": self._yellow(),
+                    "completed": self._dim(),
+                    "failed": self._red() | self._bold(),
+                    "terminated": self._dim(),
+                }.get(status, self._dim())
+                self._put(stdscr, y, lbl_col, "●", status_color | rev)
+                self._put(stdscr, y, lbl_col + 2, cli[:8], self._bold() | rev)
+                self._put(stdscr, y, lbl_col + 12, sid[:10], self._dim() | rev)
+                self._put(stdscr, y, lbl_col + 25, status[:10], status_color | rev)
+                self._put(stdscr, y, lbl_col + 36, self._format_relative_time(row.get("updatedAt"))[:10], self._dim() | rev)
+                name = str(row.get("sessionName") or row.get("task") or row.get("title") or "")
+                name_w = max(0, session_w - (lbl_col + 48))
+                self._put(stdscr, y, lbl_col + 48, name[:name_w], self._dim() | rev)
+                y += 1
+            y += 1
+        else:
+            self._put(stdscr, y, val_col, "no recent sessions for this compute", self._dim())
+            y += 2
 
         workflow_counts = (s.get("workflow_summary") or {}).get("counts", {})
         self._put(stdscr, y, lbl_col, "Workflows", self._dim())

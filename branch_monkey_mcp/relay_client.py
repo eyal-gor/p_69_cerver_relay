@@ -1712,6 +1712,7 @@ class RelayClient:
                     # last_activity, session_id, …
                     agent_rows=list(data.get("agents") or []),
                 )
+                await self._refresh_cerver_session_rows()
             except asyncio.CancelledError:
                 break
             except Exception:
@@ -1759,6 +1760,29 @@ class RelayClient:
                         agent_counts=fallback_counts,
                         agent_rows=fallback_rows,
                     )
+                await self._refresh_cerver_session_rows()
+
+    async def _refresh_cerver_session_rows(self):
+        """Poll recent Cerver session summaries for this registered compute."""
+        if not self.tui:
+            return
+        try:
+            client = self._ensure_cerver_client()
+            if not client or not client.compute_id:
+                return
+            payload = await client.list_sessions(limit=20)
+            sessions = payload.get("sessions") if isinstance(payload, dict) else []
+            if not isinstance(sessions, list):
+                return
+            rows = [
+                s for s in sessions
+                if isinstance(s, dict) and s.get("computeId") == client.compute_id
+            ][:8]
+            self._tui_update(cerver_session_rows=rows)
+        except Exception as exc:
+            # Keep Runtime useful even if the gateway is slow; local agent rows
+            # and logs are still better than blanking the table.
+            self._tui_update(cerver_session_rows=[])
 
     async def _unregister_machine(self):
         """Mark compute node as offline."""
