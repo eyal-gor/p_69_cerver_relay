@@ -297,6 +297,28 @@ class CerverComputeClient:
             },
         )
 
+    async def list_computes(self) -> Dict[str, Any]:
+        """Return every compute the authenticated account can use."""
+        if not self.api_token and not self.owner_id:
+            await self.ensure_authenticated()
+
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.get(
+                f"{self.cerver_url}/v2/computes",
+                headers=self._headers(),
+            )
+        if response.status_code == 401 and self.api_token:
+            print("[Cerver] Saved token rejected (401) — re-running browser login")
+            self._clear_persisted_auth()
+            await self.ensure_authenticated()
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                response = await client.get(
+                    f"{self.cerver_url}/v2/computes",
+                    headers=self._headers(),
+                )
+        response.raise_for_status()
+        return response.json()
+
     async def unregister(self) -> None:
         if not self.compute_id:
             return

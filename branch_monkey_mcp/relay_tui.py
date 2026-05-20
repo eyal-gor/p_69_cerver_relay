@@ -113,6 +113,9 @@ class RelayTUI:
             "compute_health": None,
             "cerver_status": "idle",
             "cerver_compute_id": None,
+            "cerver_network_computes": [],
+            "cerver_network_updated_at": None,
+            "cerver_network_error": None,
         }
         self._stdout_capture = LogCapture(sys.stdout)
         self._stderr_capture = LogCapture(sys.stderr)
@@ -126,6 +129,7 @@ class RelayTUI:
         self._stop_callback: Optional[Callable] = None
         self._scroll_offset = 0
         self._provision_scroll_offset = 0
+        self._network_scroll_offset = 0
         self._original_stdout = sys.stdout
         self._original_stderr = sys.stderr
         self._anim_frame = 0
@@ -257,7 +261,7 @@ class RelayTUI:
             now = time.monotonic()
             # Animated logo wants 10fps redraws on tabs that show it;
             # Help is static so it falls back to the slower REFRESH_MS.
-            interval = ANIM_INTERVAL if self._view in ("connect", "provision", "runtime") else self.REFRESH_MS / 1000.0
+            interval = ANIM_INTERVAL if self._view in ("connect", "provision", "network", "runtime") else self.REFRESH_MS / 1000.0
             if now - last_draw >= interval:
                 self._anim_frame += 1
                 try:
@@ -267,6 +271,8 @@ class RelayTUI:
                         self._draw_connect(stdscr, h, w)
                     elif self._view == "provision":
                         self._draw_provision(stdscr, h, w)
+                    elif self._view == "network":
+                        self._draw_network(stdscr, h, w)
                     elif self._view == "runtime":
                         self._draw_runtime(stdscr, h, w)
                     elif self._view == "help":
@@ -396,7 +402,7 @@ class RelayTUI:
             if self._view == "logs":
                 self._view = self._last_main_view
             else:
-                if self._view in ("connect", "provision", "runtime", "help"):
+                if self._view in ("connect", "provision", "network", "runtime", "help"):
                     self._last_main_view = self._view
                 self._view = "logs"
                 self._scroll_offset = 0
@@ -415,21 +421,27 @@ class RelayTUI:
                 self._last_main_view = "provision"
                 self._field_cursor = 0
         elif key == ord("3"):
+            # Direct nav: Network tab.
+            if self._view != "network":
+                self._view = "network"
+                self._last_main_view = "network"
+                self._field_cursor = 0
+        elif key == ord("4"):
             # Direct nav: Runtime tab.
             if self._view != "runtime":
                 self._view = "runtime"
                 self._last_main_view = "runtime"
                 self._field_cursor = 0
-        elif key == ord("4"):
+        elif key == ord("5"):
             # Direct nav: Help tab. Static reference page — no live
             # state, so refresh interval falls back to slow.
             if self._view != "help":
                 self._view = "help"
                 self._last_main_view = "help"
                 self._field_cursor = 0
-        elif key == ord("5"):
+        elif key == ord("6"):
             # Direct nav: Logs tab. Mirrors the [L] toggle's enter path,
-            # without the back-toggle behavior — [5] always lands you on
+            # without the back-toggle behavior — [6] always lands you on
             # logs even if you were already there.
             if self._view != "logs":
                 self._view = "logs"
@@ -461,6 +473,10 @@ class RelayTUI:
             self._scroll_offset += 1
         elif key == curses.KEY_DOWN and self._view == "logs":
             self._scroll_offset = max(0, self._scroll_offset - 1)
+        elif key == curses.KEY_UP and self._view == "network":
+            self._network_scroll_offset = max(0, self._network_scroll_offset - 1)
+        elif key == curses.KEY_DOWN and self._view == "network":
+            self._network_scroll_offset += 1
         elif key in (getattr(curses, "KEY_SR", 337), 337) and self._view == "provision":
             self._provision_scroll_offset = max(0, self._provision_scroll_offset - 1)
         elif key in (getattr(curses, "KEY_SF", 336), 336) and self._view == "provision":
@@ -492,12 +508,11 @@ class RelayTUI:
                 }.get(key_name)
                 if handler:
                     handler()
-        elif key in (curses.KEY_LEFT, curses.KEY_RIGHT) and self._view in ("connect", "provision", "runtime", "help", "logs"):
-            # ←/→ cycles forward/backward through the five main tabs.
+        elif key in (curses.KEY_LEFT, curses.KEY_RIGHT) and self._view in ("connect", "provision", "network", "runtime", "help", "logs"):
+            # ←/→ cycles forward/backward through the main tabs.
             # Provision sits between Connect (machine identity) and
-            # Runtime (workload): it covers cerver-side compute identity
-            # (the full compute_id, label, gateway connection, etc).
-            order = ["connect", "provision", "runtime", "help", "logs"]
+            # Network (account compute mesh), then Runtime (local workload).
+            order = ["connect", "provision", "network", "runtime", "help", "logs"]
             i = order.index(self._view)
             step = -1 if key == curses.KEY_LEFT else 1
             self._view = order[(i + step) % len(order)]
@@ -1481,6 +1496,111 @@ class RelayTUI:
 
         self._draw_tab_footer(stdscr, h, w, col, lbl_col, bar_w, current="provision")
 
+    # ── network view ────────────────────────────────────────────────
+
+    def _draw_network(self, stdscr, h, w):
+        s = self.state
+        col = 2
+        lbl_col = 4
+        bar_w = min(110, w - 4)
+        y = 1
+
+        ver = self._version_label(s)
+        subtitle_text = "Cerver Network"
+        if w >= LOGO_WIDTH + 6:
+            self._draw_animated_logo(stdscr, y, col)
+            y += LOGO_HEIGHT
+            self._put(stdscr, y, col + LOGO_WIDTH - len(subtitle_text), subtitle_text, self._bold() | self._green())
+            if ver:
+                self._put(stdscr, y + 1, col + LOGO_WIDTH - len(ver), ver, self._dim())
+                y += 2
+            else:
+                y += 1
+            self._hline(stdscr, y, col, bar_w)
+            y += 2
+        else:
+            self._put(stdscr, y, col, subtitle_text, self._bold() | self._green())
+            y += 1
+            if ver:
+                self._put(stdscr, y, col, ver, self._dim())
+                y += 1
+            self._hline(stdscr, y, col, bar_w)
+            y += 2
+
+        if s.get("quit_prompt") == "pending":
+            self._draw_quit_prompt(stdscr, y, col, bar_w)
+            return
+
+        rows = s.get("cerver_network_computes") or []
+        if not isinstance(rows, list):
+            rows = []
+        connected = sum(1 for r in rows if self._compute_is_connected(r))
+        private_rows = [r for r in rows if str(r.get("scope") or "private").lower() == "private"]
+        updated = self._format_relative_time(s.get("cerver_network_updated_at"))
+        error = s.get("cerver_network_error")
+
+        self._put(stdscr, y, lbl_col, "PRIVATE NETWORK", self._dim())
+        y += 1
+        self._hline(stdscr, y, col, bar_w)
+        y += 1
+        summary = f"{connected}/{len(rows)} connected"
+        if private_rows:
+            summary += f"  ·  {len(private_rows)} private"
+        if updated != "—":
+            summary += f"  ·  refreshed {updated}"
+        self._put(stdscr, y, lbl_col, summary, self._bold())
+        y += 1
+        if error:
+            self._put(stdscr, y, lbl_col, f"Gateway: {error}", self._red())
+        else:
+            self._put(stdscr, y, lbl_col, "Computes connected to this account, including offline machines.", self._dim())
+        y += 2
+
+        headers = (("STATUS", 14), ("LABEL", 24), ("PROVIDER", 24), ("SCOPE", 10), ("ID", 22))
+        x = lbl_col
+        for title, width in headers:
+            self._put(stdscr, y, x, title, self._dim() | self._bold())
+            x += width
+        y += 1
+        self._hline(stdscr, y, col, bar_w)
+        y += 1
+
+        visible_h = max(1, h - y - 4)
+        max_offset = max(0, len(rows) - visible_h)
+        self._network_scroll_offset = min(self._network_scroll_offset, max_offset)
+        start = self._network_scroll_offset
+        visible_rows = rows[start:start + visible_h]
+        if not visible_rows:
+            self._put(stdscr, y, lbl_col, "No computes returned yet.", self._dim())
+        for row in visible_rows:
+            connected_row = self._compute_is_connected(row)
+            status = str(row.get("status") or "unknown")
+            status_text = "connected" if connected_row else status
+            status_attr = self._green() | self._bold() if connected_row else self._dim()
+            label = str(row.get("label") or row.get("name") or "—")
+            provider = str(row.get("provider") or "—")
+            scope = str(row.get("scope") or "private")
+            compute_id = str(row.get("compute_id") or row.get("id") or "—")
+            if compute_id == s.get("cerver_compute_id"):
+                label = f"{label} *"
+            x = lbl_col
+            for value, width, attr in (
+                (status_text, 14, status_attr),
+                (label, 24, self._bold()),
+                (provider, 24, self._dim()),
+                (scope, 10, self._dim()),
+                (compute_id, 22, self._cyan() if connected_row else self._dim()),
+            ):
+                self._put(stdscr, y, x, self._clip(value, width - 1), attr)
+                x += width
+            y += 1
+
+        if len(rows) > visible_h:
+            pct = int(((start + len(visible_rows)) / max(len(rows), 1)) * 100)
+            self._put(stdscr, 1, col + bar_w - 8, f"  {pct:3d}%", self._dim())
+
+        self._draw_tab_footer(stdscr, h, w, col, lbl_col, bar_w, current="network")
+
     # ── runtime view ─────────────────────────────────────────────────
     # Workload (agents, workflows, requests) and the underlying compute
     # resources (CPU / memory / load / disk). Sibling of Connect; shares
@@ -1803,7 +1923,14 @@ class RelayTUI:
         # also cycles (handler routes those into the matching _view
         # assignment). Logs is a peer tab now — [L] still works as a
         # shortcut but arrow nav reaches it too.
-        for key_label, view_name, display in (("[1]", "connect", "Connect"), ("[2]", "provision", "Provision"), ("[3]", "runtime", "Runtime"), ("[4]", "help", "Help"), ("[5]", "logs", "Logs")):
+        for key_label, view_name, display in (
+            ("[1]", "connect", "Connect"),
+            ("[2]", "provision", "Provision"),
+            ("[3]", "network", "Network"),
+            ("[4]", "runtime", "Runtime"),
+            ("[5]", "help", "Help"),
+            ("[6]", "logs", "Logs"),
+        ):
             self._put(stdscr, footer_y, x, key_label, self._cyan() | self._bold())
             is_active = (current == view_name)
             if is_active:
@@ -1831,6 +1958,10 @@ class RelayTUI:
             x += 20
             self._put(stdscr, footer_y, x, "[S]", self._cyan() | self._bold())
             self._put(stdscr, footer_y, x + 4, "Startup", self._dim())
+            x += 13
+        elif current == "network":
+            self._put(stdscr, footer_y, x, "[↑↓]", self._cyan() | self._bold())
+            self._put(stdscr, footer_y, x + 5, "Scroll", self._dim())
             x += 13
         elif current in ("connect", "runtime"):
             # Both Connect (Machine / Startup / Logout) and Runtime
@@ -2424,6 +2555,41 @@ class RelayTUI:
         self._draw_tab_footer(stdscr, h, w, col, lbl_col=col + 2, bar_w=bar_w, current="logs")
 
     # ── helpers ──────────────────────────────────────────────────────
+
+    def _clip(self, value, width: int) -> str:
+        text = str(value)
+        if width <= 0:
+            return ""
+        if len(text) <= width:
+            return text
+        if width <= 1:
+            return text[:width]
+        return text[: width - 1] + "…"
+
+    def _compute_is_connected(self, row: Dict[str, Any]) -> bool:
+        status = str(row.get("status") or "").lower()
+        return status in ("online", "ready", "connected")
+
+    def _format_relative_time(self, value) -> str:
+        if not value:
+            return "—"
+        if isinstance(value, str):
+            try:
+                value = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            except Exception:
+                return value
+        if not isinstance(value, datetime):
+            return "—"
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        total = max(0, int((datetime.now(timezone.utc) - value).total_seconds()))
+        if total < 60:
+            return f"{total}s ago"
+        if total < 3600:
+            return f"{total // 60}m ago"
+        if total < 86400:
+            return f"{total // 3600}h ago"
+        return f"{total // 86400}d ago"
 
     def _format_uptime(self) -> str:
         connected_at = self.state.get("connected_at")

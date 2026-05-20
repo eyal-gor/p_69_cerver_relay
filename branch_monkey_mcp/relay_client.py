@@ -299,6 +299,7 @@ class RelayClient:
         self._health_check_task: Optional[asyncio.Task] = None
         self._heartbeat_task: Optional[asyncio.Task] = None
         self._cerver_heartbeat_task: Optional[asyncio.Task] = None
+        self._cerver_network_task: Optional[asyncio.Task] = None
         self._local_stats_task: Optional[asyncio.Task] = None
         self._background_tasks: set = set()
         self._do_reconnect_attempts = 0
@@ -967,6 +968,7 @@ class RelayClient:
         self._health_check_task = asyncio.create_task(self._health_check_loop())
         self._local_stats_task = asyncio.create_task(self._local_stats_loop())
         self._cerver_heartbeat_task = asyncio.create_task(self._cerver_heartbeat_loop())
+        self._cerver_network_task = asyncio.create_task(self._cerver_network_loop())
         self._update_check_task = asyncio.create_task(self._update_check_loop())
         self._infisical_refresh_task = asyncio.create_task(self._infisical_refresh_loop())
 
@@ -998,6 +1000,8 @@ class RelayClient:
                 self._local_stats_task.cancel()
             if self._cerver_heartbeat_task:
                 self._cerver_heartbeat_task.cancel()
+            if self._cerver_network_task:
+                self._cerver_network_task.cancel()
             if self._reconnect_task:
                 self._reconnect_task.cancel()
 
@@ -1015,6 +1019,7 @@ class RelayClient:
                     self._health_check_task,
                     self._local_stats_task,
                     self._cerver_heartbeat_task,
+                    self._cerver_network_task,
                 ]
                 if t
             ]
@@ -1345,6 +1350,28 @@ class RelayClient:
                 # without overwriting the channel's own state.
                 self._tui_update(cerver_http_error=str(e)[:80])
 
+    async def _cerver_network_loop(self):
+        """Poll the account's Cerver compute network for the TUI."""
+        interval = 10 if self.tui else 60
+        while self._running:
+            try:
+                client = self._ensure_cerver_client()
+                if client:
+                    payload = await client.list_computes()
+                    computes = payload.get("computes") if isinstance(payload, dict) else None
+                    if isinstance(computes, list):
+                        self._tui_update(
+                            cerver_network_computes=computes,
+                            cerver_network_updated_at=datetime.now(timezone.utc),
+                            cerver_network_error=None,
+                        )
+                await asyncio.sleep(interval)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                self._tui_update(cerver_network_error=str(e)[:80])
+                await asyncio.sleep(interval)
+
     async def _check_for_updates_once(self) -> bool:
         """One-shot check: is the live `main` ahead of CURRENT_COMMIT_SHA?
         If yes, exec self with --refresh so the new commit takes effect
@@ -1514,6 +1541,7 @@ class RelayClient:
         self._tui_update(cerver_only=True)
         await self._register_cerver_compute()
         self._cerver_heartbeat_task = asyncio.create_task(self._cerver_heartbeat_loop())
+        self._cerver_network_task = asyncio.create_task(self._cerver_network_loop())
         # Background poll: keep the running relay up to date without
         # requiring restarts. Same loop the dual-mode path uses.
         self._update_check_task = asyncio.create_task(self._update_check_loop())
@@ -1532,6 +1560,12 @@ class RelayClient:
                 self._cerver_heartbeat_task.cancel()
                 try:
                     await asyncio.gather(self._cerver_heartbeat_task, return_exceptions=True)
+                except Exception:
+                    pass
+            if self._cerver_network_task:
+                self._cerver_network_task.cancel()
+                try:
+                    await asyncio.gather(self._cerver_network_task, return_exceptions=True)
                 except Exception:
                     pass
             await self._stop_cerver_connect_transport()
