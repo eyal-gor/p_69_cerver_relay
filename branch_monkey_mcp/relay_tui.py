@@ -125,6 +125,7 @@ class RelayTUI:
         self._running = True
         self._stop_callback: Optional[Callable] = None
         self._scroll_offset = 0
+        self._provision_scroll_offset = 0
         self._original_stdout = sys.stdout
         self._original_stderr = sys.stderr
         self._anim_frame = 0
@@ -440,7 +441,7 @@ class RelayTUI:
             if self._view in ("connect", "runtime"):
                 self._verbose = not self._verbose
         elif key == ord("s") or key == ord("S"):
-            if self._view == "connect":
+            if self._view in ("connect", "provision"):
                 self._action_toggle_launchd()
         elif key == ord("c") or key == ord("C"):
             # AI CLI moved to Runtime — accept [C] from either tab too.
@@ -453,6 +454,10 @@ class RelayTUI:
             self._scroll_offset += 1
         elif key == curses.KEY_DOWN and self._view == "logs":
             self._scroll_offset = max(0, self._scroll_offset - 1)
+        elif key == curses.KEY_UP and self._view == "provision":
+            self._provision_scroll_offset = max(0, self._provision_scroll_offset - 1)
+        elif key == curses.KEY_DOWN and self._view == "provision":
+            self._provision_scroll_offset += 1
         elif key == curses.KEY_UP and self._view in ("connect", "provision", "runtime"):
             fields = self._active_field_keys()
             if fields:
@@ -1118,6 +1123,7 @@ class RelayTUI:
         val_col = 20
         bar_w = min(80, w - 4)
         y = 1
+        self._provision_scroll_offset = min(self._provision_scroll_offset, 40)
 
         # Header — same animated logo treatment as Connect/Runtime.
         ver = self._version_label(s)
@@ -1141,6 +1147,17 @@ class RelayTUI:
                 y += 1
             self._hline(stdscr, y, col, bar_w)
             y += 2
+
+        y -= self._provision_scroll_offset
+        if self._provision_scroll_offset > 0:
+            self._put(stdscr, 1, max(0, w - 18), f"↑ {self._provision_scroll_offset}", self._dim())
+
+        # Global quit confirmation. Key handling already sets
+        # quit_prompt from any tab; Provision needs to render it too so
+        # pressing Q does not look like a no-op.
+        if s.get("quit_prompt") == "pending":
+            self._draw_quit_prompt(stdscr, y, col, bar_w)
+            return
 
         # COMPUTE section — the identity the gateway sees.
         self._put(stdscr, y, lbl_col, "COMPUTE", self._dim())
@@ -1798,7 +1815,14 @@ class RelayTUI:
         self._put(stdscr, footer_y, x + 4, "Verbose", self._dim())
         x += 13
 
-        if current in ("connect", "runtime"):
+        if current == "provision":
+            self._put(stdscr, footer_y, x, "[↑↓]", self._cyan() | self._bold())
+            self._put(stdscr, footer_y, x + 5, "Scroll", self._dim())
+            x += 13
+            self._put(stdscr, footer_y, x, "[S]", self._cyan() | self._bold())
+            self._put(stdscr, footer_y, x + 4, "Startup", self._dim())
+            x += 13
+        elif current in ("connect", "runtime"):
             # Both Connect (Machine / Startup / Logout) and Runtime
             # (Home / AI CLI) have focusable rows navigated by Up/Down
             # + Enter. Letter shortcuts ([N]/[H]/[S]/[C]/[D]) still work
