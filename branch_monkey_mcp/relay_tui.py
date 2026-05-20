@@ -433,21 +433,21 @@ class RelayTUI:
                 self._last_main_view = "runtime"
                 self._field_cursor = 0
         elif key == ord("5"):
-            # Direct nav: Help tab. Static reference page — no live
-            # state, so refresh interval falls back to slow.
-            if self._view != "help":
-                self._view = "help"
-                self._last_main_view = "help"
-                self._field_cursor = 0
-        elif key == ord("6"):
             # Direct nav: Logs tab. Mirrors the [L] toggle's enter path,
-            # without the back-toggle behavior — [6] always lands you on
+            # without the back-toggle behavior — [5] always lands you on
             # logs even if you were already there.
             if self._view != "logs":
                 self._view = "logs"
                 self._scroll_offset = 0
             self._last_main_view = "logs"
             self._field_cursor = 0
+        elif key == ord("6"):
+            # Direct nav: Help tab. Static reference page — no live
+            # state, so refresh interval falls back to slow.
+            if self._view != "help":
+                self._view = "help"
+                self._last_main_view = "help"
+                self._field_cursor = 0
         elif key == ord("n") or key == ord("N"):
             if self._view == "connect":
                 self._action_edit_name(stdscr)
@@ -512,7 +512,7 @@ class RelayTUI:
             # ←/→ cycles forward/backward through the main tabs.
             # Provision sits between Connect (machine identity) and
             # Network (account compute mesh), then Runtime (local workload).
-            order = ["connect", "provision", "network", "runtime", "help", "logs"]
+            order = ["connect", "provision", "network", "runtime", "logs", "help"]
             i = order.index(self._view)
             step = -1 if key == curses.KEY_LEFT else 1
             self._view = order[(i + step) % len(order)]
@@ -1884,7 +1884,7 @@ class RelayTUI:
 
         # ── TUI keybindings ─────────────────────────────────────
         if section("KEYBINDINGS"):
-            row("[1] / [2] / [3] / [4] / [5]", "Connect / Provision / Runtime / Help / Logs")
+            row("[1] / [2] / [3] / [4] / [5] / [6]", "Connect / Provision / Network / Runtime / Logs / Help")
             row("← / →", "cycle tabs")
             row("[L]", "logs (toggle, same as [5])")
             row("[V]", "verbose mode on this tab")
@@ -1928,8 +1928,8 @@ class RelayTUI:
             ("[2]", "provision", "Provision"),
             ("[3]", "network", "Network"),
             ("[4]", "runtime", "Runtime"),
-            ("[5]", "help", "Help"),
-            ("[6]", "logs", "Logs"),
+            ("[5]", "logs", "Logs"),
+            ("[6]", "help", "Help"),
         ):
             self._put(stdscr, footer_y, x, key_label, self._cyan() | self._bold())
             is_active = (current == view_name)
@@ -1940,10 +1940,6 @@ class RelayTUI:
             label = f" {display} " if is_active else display
             self._put(stdscr, footer_y, x + 4, label, attr)
             x += 4 + len(label) + 2
-
-        self._put(stdscr, footer_y, x, "←→", self._cyan() | self._bold())
-        self._put(stdscr, footer_y, x + 3, "Switch", self._dim())
-        x += 11
 
     def _draw_animated_logo(self, stdscr, y, col):
         """Draw the logo as a rain-on-water surface. Random raindrops
