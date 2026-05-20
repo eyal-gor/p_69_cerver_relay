@@ -220,27 +220,34 @@ class RelayTUI:
     # ── curses main loop ─────────────────────────────────────────────
 
     def _main_loop(self, stdscr):
-        curses.use_default_colors()
-        curses.curs_set(0)
+        default_bg = -1
+        try:
+            curses.use_default_colors()
+        except curses.error:
+            default_bg = curses.COLOR_BLACK
+        try:
+            curses.curs_set(0)
+        except curses.error:
+            pass
         # Short timeout so we poll keys every 100ms for responsive input
         stdscr.timeout(100)
 
         if curses.has_colors():
-            curses.init_pair(1, curses.COLOR_GREEN, -1)
-            curses.init_pair(2, curses.COLOR_RED, -1)
-            curses.init_pair(3, curses.COLOR_YELLOW, -1)
-            curses.init_pair(4, curses.COLOR_CYAN, -1)
+            curses.init_pair(1, curses.COLOR_GREEN, default_bg)
+            curses.init_pair(2, curses.COLOR_RED, default_bg)
+            curses.init_pair(3, curses.COLOR_YELLOW, default_bg)
+            curses.init_pair(4, curses.COLOR_CYAN, default_bg)
             try:
-                curses.init_pair(5, 8, -1)  # bright black (gray)
+                curses.init_pair(5, 8, default_bg)  # bright black (gray)
             except curses.error:
-                curses.init_pair(5, curses.COLOR_WHITE, -1)
+                curses.init_pair(5, curses.COLOR_WHITE, default_bg)
             # Logo gradient: smooth indigo → white (8 levels, pairs 10–17)
             for i, color_num in enumerate(GRADIENT_COLORS):
                 try:
-                    curses.init_pair(10 + i, color_num, -1)
+                    curses.init_pair(10 + i, color_num, default_bg)
                 except curses.error:
                     fb = curses.COLOR_BLUE if i < 3 else (curses.COLOR_CYAN if i < 6 else curses.COLOR_WHITE)
-                    curses.init_pair(10 + i, fb, -1)
+                    curses.init_pair(10 + i, fb, default_bg)
 
         last_draw = 0.0
         # Logo animates smoothly
