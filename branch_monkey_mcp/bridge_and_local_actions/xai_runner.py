@@ -56,6 +56,46 @@ def _run() -> int:
         print("xai_runner: no API key (set ANTHROPIC_API_KEY or XAI_API_KEY)", file=sys.stderr)
         return 2
 
+    # Sanitize. Two layers of damage we've seen on the vault value
+    # for XAI_API_KEY:
+    #   1. Non-ASCII (↓, smart quotes, non-breaking space). HTTP
+    #      header values must encode to latin-1; non-ASCII bricks
+    #      urllib with an opaque codec error *inside* the http call,
+    #      after the gateway has already accepted the session.
+    #   2. Terminal escape leftovers (\x1b[?2004h, \x1b[?1004h paste-
+    #      mode codes) baked into the visible characters. These get
+    #      pasted in when the user copies from a terminal with
+    #      bracketed-paste enabled and the escape sequence's printable
+    #      tail (`[?2004h`) ends up alongside the key text.
+    #
+    # Strategy: prefer to extract a contiguous run that looks like an
+    # xAI key (`xai-` + 40+ alphanumeric/-/_ chars). Fall back to a
+    # general printable-ASCII strip if the regex finds nothing.
+    import re
+    extracted = None
+    m = re.search(r"xai-[A-Za-z0-9_-]{40,}", api_key)
+    if m:
+        extracted = m.group(0)
+    else:
+        # No clear xai-pattern — fall back to printable-ASCII strip and
+        # hope the underlying value is just a non-standard format.
+        extracted = "".join(ch for ch in api_key if 0x20 <= ord(ch) < 0x7f).strip()
+    if not extracted:
+        msg = "xai_runner: API key empty/unparseable after sanitization — vault value is malformed"
+        if args.output_format == "stream-json":
+            _emit({"type": "error", "message": msg})
+        else:
+            print(msg, file=sys.stderr)
+        return 2
+    if extracted != api_key:
+        # Don't reveal the secret — just say what was dropped so a
+        # silently-corrected key still surfaces during debugging.
+        sys.stderr.write(
+            f"xai_runner: sanitized API key ({len(api_key)} -> {len(extracted)} bytes). "
+            f"Rotate the value in your vault to clean it up properly.\n"
+        )
+    api_key = extracted
+
     base_url = os.environ.get("ANTHROPIC_BASE_URL") or "https://api.x.ai"
     body: dict = {
         "model": args.model,
