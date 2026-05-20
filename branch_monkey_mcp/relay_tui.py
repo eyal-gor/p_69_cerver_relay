@@ -461,9 +461,9 @@ class RelayTUI:
             self._scroll_offset += 1
         elif key == curses.KEY_DOWN and self._view == "logs":
             self._scroll_offset = max(0, self._scroll_offset - 1)
-        elif key == curses.KEY_UP and self._view == "provision":
+        elif key in (getattr(curses, "KEY_SR", 337), 337) and self._view == "provision":
             self._provision_scroll_offset = max(0, self._provision_scroll_offset - 1)
-        elif key == curses.KEY_DOWN and self._view == "provision":
+        elif key in (getattr(curses, "KEY_SF", 336), 336) and self._view == "provision":
             self._provision_scroll_offset += 1
         elif key == curses.KEY_UP and self._view in ("connect", "provision", "runtime"):
             fields = self._active_field_keys()
@@ -1824,8 +1824,11 @@ class RelayTUI:
 
         if current == "provision":
             self._put(stdscr, footer_y, x, "[↑↓]", self._cyan() | self._bold())
-            self._put(stdscr, footer_y, x + 5, "Scroll", self._dim())
+            self._put(stdscr, footer_y, x + 5, "Select", self._dim())
             x += 13
+            self._put(stdscr, footer_y, x, "[Shift+↑↓]", self._cyan() | self._bold())
+            self._put(stdscr, footer_y, x + 11, "Scroll", self._dim())
+            x += 20
             self._put(stdscr, footer_y, x, "[S]", self._cyan() | self._bold())
             self._put(stdscr, footer_y, x + 4, "Startup", self._dim())
             x += 13
