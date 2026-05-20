@@ -2154,17 +2154,21 @@ def _run_with_tui(args, home_dir, current_project, onboarding_needed=False):
         if do_install:
             home = tui.state.get("home_dir")
             if install_launchd_service(home):
-                tui.update(launchd="running")
+                status = check_launchd_status()
+                tui.update(
+                    launchd="running" if status.get("running") else "installed",
+                    launchd_pid=status.get("pid"),
+                )
                 print("[Relay] Launchd service installed.")
             else:
-                tui.update(launchd="error")
+                tui.update(launchd="error", launchd_pid=None)
                 print("[Relay] Failed to install launchd service.")
         else:
             # Uninstall
             if LAUNCHD_PLIST_PATH.exists():
                 subprocess.run(["launchctl", "unload", str(LAUNCHD_PLIST_PATH)], capture_output=True)
                 LAUNCHD_PLIST_PATH.unlink(missing_ok=True)
-            tui.update(launchd="not_installed")
+            tui.update(launchd="not_installed", launchd_pid=None)
             print("[Relay] Launchd service removed.")
         tui.update(launchd_prompt="done")
         # Show CLI selection if needed (first run with multiple CLIs)
@@ -2280,8 +2284,10 @@ def _run_with_tui(args, home_dir, current_project, onboarding_needed=False):
             launchd_state = "installed"
         else:
             launchd_state = "not_installed"
+        launchd_pid = ld_status.get("pid")
     else:
         launchd_state = None
+        launchd_pid = None
 
     # Pre-populate user/org info from cached token
     cached_user_email = None
@@ -2325,6 +2331,7 @@ def _run_with_tui(args, home_dir, current_project, onboarding_needed=False):
         org_name=cached_org_name,
         onboarding_needed=onboarding_needed,
         launchd=launchd_state,
+        launchd_pid=launchd_pid,
         cli_providers=cli_providers,
         default_cli=default_cli,
         cerver_only=args.cerver_only,

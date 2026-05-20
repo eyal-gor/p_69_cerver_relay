@@ -102,6 +102,7 @@ class RelayTUI:
             "registered": None,  # None=pending, True=ok, str=error
             "stream_bridge": None,  # None=not started, True=connected, False=disconnected, str=error
             "launchd": None,  # None=unknown, "running", "installed", "not_installed", "error"
+            "launchd_pid": None,
             "launchd_prompt": None,  # None=don't show, "pending"=showing, "done"=answered
             "cli_providers": {},  # {name: {display_name, installed, ...}}
             "default_cli": "claude",
@@ -526,7 +527,10 @@ class RelayTUI:
         Provision is mostly read-only telemetry, but the MAINTENANCE
         section offers an in-place CLI upgrade action.
         """
-        return ["update_cli"]
+        fields = ["update_cli"]
+        if self.state.get("launchd") is not None:
+            fields.append("launchd")
+        return fields
 
     def _active_field_keys(self) -> list:
         """Field list for whichever tab the cursor is currently on."""
@@ -699,8 +703,8 @@ class RelayTUI:
         ),
         "launchd": (
             "Startup (launchd)",
-            "Whether macOS auto-launches the relay when you log in.",
-            "Enter toggles the launchd job install on/off.",
+            "Whether macOS auto-launches a background relay on login.",
+            "If you run a manual relay too, both can fight for port 18081.",
         ),
         "logout": (
             "Logout",
@@ -1412,6 +1416,40 @@ class RelayTUI:
         else:
             self._put(stdscr, y, val_col, "Press Enter to upgrade in place", self._dim() | rev_update)
         y += 1
+
+        # Startup service — the common source of "the relay starts and
+        # drops" confusion is a launchd-managed background relay already
+        # holding port 18081 while the user starts another foreground
+        # relay. Keep the control near Provision because it affects how
+        # this compute is brought online.
+        ld = s.get("launchd")
+        if ld is not None:
+            focused_ld = self._focused_field_key() == "launchd"
+            rev_ld = curses.A_REVERSE if focused_ld else 0
+            pid = s.get("launchd_pid")
+            self._put(stdscr, y, lbl_col, "Startup service", self._dim() | rev_ld)
+            if ld == "running":
+                self._put(stdscr, y, val_col, "●", self._green() | self._bold() | rev_ld)
+                msg = f"launchd running" + (f" · pid {pid}" if pid else "")
+                self._put(stdscr, y, val_col + 2, msg[: max(0, w - val_col - 4)], rev_ld)
+                y += 1
+                self._put(
+                    stdscr,
+                    y,
+                    val_col,
+                    "Enter stops/removes it before you run a manual relay.",
+                    self._dim() | rev_ld,
+                )
+            elif ld == "installed":
+                self._put(stdscr, y, val_col, "●", self._yellow() | self._bold() | rev_ld)
+                self._put(stdscr, y, val_col + 2, "Installed, not running · Enter to remove", rev_ld)
+            elif ld == "error":
+                self._put(stdscr, y, val_col, "●", self._red() | self._bold() | rev_ld)
+                self._put(stdscr, y, val_col + 2, "Error · check Logs", rev_ld)
+            else:
+                self._put(stdscr, y, val_col, "●", self._dim() | rev_ld)
+                self._put(stdscr, y, val_col + 2, "Not installed · Enter to enable auto-start", rev_ld)
+            y += 1
 
         # About panel — explains the focused row when one is selected.
         y += 1
