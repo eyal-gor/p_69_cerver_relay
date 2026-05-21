@@ -1120,6 +1120,88 @@ class RelayClient:
         except Exception:
             pass
 
+    async def _provision_sandbox_workspace(self) -> None:
+        """
+        Clone the gateway-supplied project repo into this sandbox so
+        agents can read/write its files without per-task setup. Only
+        fires when `CERVER_PROVISION_REPO` is in env — that's the
+        signal from the gateway's sandbox-relay provisioner. On a
+        local relay (user's Mac) the env var is absent and this is a
+        no-op; the user's existing working_dir is preserved.
+
+        Optional `CERVER_PROVISION_REPO_REF` pins a branch or commit.
+        Default checkout is whatever the remote's HEAD points to.
+
+        Clone target: $HOME/work. Chosen because:
+          - $HOME exists in every sandbox provider's filesystem layout
+            (Vercel mounts /vercel/sandbox as the user home; Cloudflare
+            and E2B follow standard FHS).
+          - A single fixed path keeps every agent's `cwd` consistent
+            across providers; tests / agents can reference paths
+            relative to ~/work without per-provider conditionals.
+
+        Failure is non-fatal — the relay stays up serving tasks even
+        if the clone fails (network blip, missing repo, bad ref). The
+        agent then runs in the default home directory, same as it
+        would on a sandbox without a project.
+        """
+        repo_url = os.environ.get("CERVER_PROVISION_REPO", "").strip()
+        if not repo_url:
+            return
+        repo_ref = os.environ.get("CERVER_PROVISION_REPO_REF", "").strip()
+
+        from .bridge_and_local_actions import set_default_working_dir
+        workspace = Path.home() / "work"
+
+        # If a prior boot already cloned here (sandbox restarted while
+        # disk persisted, snapshot reuse, etc.), skip the clone and
+        # just fast-forward.
+        if (workspace / ".git").exists():
+            print(f"[Provision] Workspace already present at {workspace} — skipping clone")
+            try:
+                set_default_working_dir(str(workspace))
+            except Exception as e:
+                print(f"[Provision] set_default_working_dir failed (non-fatal): {e}")
+            return
+
+        print(f"[Provision] Cloning {repo_url} -> {workspace}")
+        started = datetime.now()
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "git", "clone", "--depth", "50", repo_url, str(workspace),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+            stdout, _ = await proc.communicate()
+            if proc.returncode != 0:
+                tail = (stdout or b"").decode("utf-8", errors="replace").strip()[-300:]
+                print(f"[Provision] git clone failed (exit {proc.returncode}); workspace not set\n{tail}")
+                return
+        except Exception as e:
+            print(f"[Provision] git clone errored (non-fatal): {e}")
+            return
+
+        if repo_ref:
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    "git", "-C", str(workspace), "checkout", repo_ref,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.STDOUT,
+                )
+                stdout, _ = await proc.communicate()
+                if proc.returncode != 0:
+                    tail = (stdout or b"").decode("utf-8", errors="replace").strip()[-300:]
+                    print(f"[Provision] git checkout {repo_ref} failed (exit {proc.returncode}); using default branch\n{tail}")
+            except Exception as e:
+                print(f"[Provision] git checkout errored (non-fatal): {e}")
+
+        elapsed = (datetime.now() - started).total_seconds()
+        try:
+            set_default_working_dir(str(workspace))
+            print(f"[Provision] Workspace ready at {workspace} in {elapsed:.1f}s")
+        except Exception as e:
+            print(f"[Provision] set_default_working_dir failed (non-fatal): {e}")
+
     async def _bootstrap_cerver_credentials(self) -> None:
         """
         Ensure self.cerver_api_token is populated, fetching from Infisical
@@ -1579,6 +1661,15 @@ class RelayClient:
         # back to device auth and registration can fail before the compute ever
         # appears in the dashboard.
         await self._bootstrap_cerver_credentials()
+
+        # Sandbox-mode bootstrap: if the gateway provisioned this relay
+        # inside a shared-provider sandbox (Vercel/Cloudflare/E2B) and
+        # passed a CERVER_PROVISION_REPO env, clone that repo into a
+        # known workspace path and use it as the relay's default
+        # working dir. Agents spawned in this sandbox will then run
+        # inside the project tree without per-task setup. No-op on a
+        # local relay (env var absent).
+        await self._provision_sandbox_workspace()
 
         await self._register_cerver_compute()
         self._cerver_heartbeat_task = asyncio.create_task(self._cerver_heartbeat_loop())
