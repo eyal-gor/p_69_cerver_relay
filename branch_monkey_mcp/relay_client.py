@@ -1153,6 +1153,27 @@ class RelayClient:
         from .bridge_and_local_actions import set_default_working_dir
         workspace = Path.home() / "work"
 
+        # Set up git auth for private repos. The gateway injects
+        # GITHUB_TOKEN as env when the user has one in Infisical;
+        # without it we can only clone public repos. ~/.netrc is the
+        # least-surgical option — git reads it transparently, no URL
+        # mangling, no per-call --config flags, and the token never
+        # ends up baked into the cloned remote's URL. chmod 600 is
+        # required (git ignores .netrc files that are world-readable).
+        gh_token = os.environ.get("GITHUB_TOKEN", "").strip()
+        if gh_token:
+            try:
+                netrc_path = Path.home() / ".netrc"
+                netrc_path.write_text(
+                    f"machine github.com\n"
+                    f"  login x-access-token\n"
+                    f"  password {gh_token}\n"
+                )
+                netrc_path.chmod(0o600)
+                print("[Provision] ~/.netrc configured for github.com")
+            except Exception as e:
+                print(f"[Provision] ~/.netrc write failed (non-fatal): {e}")
+
         # If a prior boot already cloned here (sandbox restarted while
         # disk persisted, snapshot reuse, etc.), skip the clone and
         # just fast-forward.
