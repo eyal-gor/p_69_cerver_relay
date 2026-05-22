@@ -1900,6 +1900,17 @@ class RelayClient:
     async def _local_stats_loop(self):
         """Poll the local bridge for workload and compute stats."""
         interval = 5 if self.tui else 30  # Fast polling only when TUI is active
+        # First iteration: push compute to the TUI BEFORE the sleep so
+        # the COMPUTE section is populated within milliseconds of relay
+        # startup, not after the first 5-second poll. User-reported:
+        # "kept seeing — the whole time" was actually "saw — for the
+        # 5 seconds before the first poll", but the 5s wait felt long
+        # enough to assume something was broken. Doing this push up
+        # front removes that confusion.
+        try:
+            self._tui_update(compute=self._collect_compute_locally())
+        except Exception:
+            pass
         while self._running:
             # Always gather compute locally — much more reliable than
             # the HTTP /stats subprocess-based gather, which has been
