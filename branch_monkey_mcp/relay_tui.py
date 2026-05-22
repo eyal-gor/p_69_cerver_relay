@@ -139,6 +139,7 @@ class RelayTUI:
         self._scroll_offset = 0
         self._provision_scroll_offset = 0
         self._network_scroll_offset = 0
+        self._runtime_scroll_offset = 0
         self._original_stdout = sys.stdout
         self._original_stderr = sys.stderr
         self._anim_frame = 0
@@ -496,6 +497,15 @@ class RelayTUI:
             self._provision_scroll_offset = max(0, self._provision_scroll_offset - 1)
         elif key in (getattr(curses, "KEY_SF", 336), 336) and self._view == "provision":
             self._provision_scroll_offset += 1
+        # Shift+Up/Shift+Down scrolls the Runtime tab. Same key codes
+        # as Provision (KEY_SR=337 / KEY_SF=336). Plain Up/Down is
+        # taken on Runtime — it cycles through focusable fields
+        # (Home, AI CLI, agent rows) — so the user needs Shift to
+        # disambiguate scrolling vs. field navigation.
+        elif key in (getattr(curses, "KEY_SR", 337), 337) and self._view == "runtime":
+            self._runtime_scroll_offset = max(0, self._runtime_scroll_offset - 1)
+        elif key in (getattr(curses, "KEY_SF", 336), 336) and self._view == "runtime":
+            self._runtime_scroll_offset += 1
         elif key == curses.KEY_UP and self._view in ("connect", "provision", "runtime"):
             fields = self._active_field_keys()
             if fields:
@@ -1676,11 +1686,17 @@ class RelayTUI:
             self._put(stdscr, y, dot_x, "○", self._red() | rev_cli)
         y += 1
 
-        # Contextual help — explains whatever row is currently focused
-        # (Home or AI CLI on Runtime). Same panel shape as Connect.
-        y += 1
-        y = self._draw_field_help(stdscr, y, col, bar_w)
-        y += 1
+        # About panel used to sit here (between AI CLI and WORKLOAD)
+        # but the user wanted it moved to the bottom so the live data
+        # (workload + compute) is up top where it's first seen. Rendered
+        # after COMPUTE now, just before the footer.
+
+        # Shift+Up/Shift+Down scrolls the whole tab body; subtract the
+        # offset from y so a tall agent list or compute section can be
+        # scrolled past. Same shape as the Provision tab.
+        y -= self._runtime_scroll_offset
+        if self._runtime_scroll_offset > 0:
+            self._put(stdscr, 1, max(0, w - 18), f"↑ {self._runtime_scroll_offset}", self._dim())
 
         # Workload
         self._put(stdscr, y, lbl_col, "WORKLOAD", self._dim())
@@ -1897,18 +1913,14 @@ class RelayTUI:
         y += 1
 
 
-        # Recent log lines
-        self._put(stdscr, y, lbl_col, "RECENT", self._dim())
+        # About panel — moved from above WORKLOAD to here at the user's
+        # request. Live data (workload + compute) reads first; the
+        # contextual help explaining the focused field (Home / AI CLI /
+        # an agent row) sits at the bottom where it's available but
+        # doesn't push the dashboard down. Logs go on the [L] tab,
+        # which is the right place for them.
         y += 1
-        self._hline(stdscr, y, col, bar_w)
-        y += 1
-
-        recent = self._stdout_capture.get_lines(3)
-        for line in recent:
-            if y >= h - 3:
-                break
-            self._put(stdscr, y, lbl_col, line[:bar_w], self._dim())
-            y += 1
+        y = self._draw_field_help(stdscr, y, col, bar_w)
 
         self._draw_tab_footer(stdscr, h, w, col, lbl_col, bar_w, current="runtime")
 
