@@ -1798,10 +1798,116 @@ class RelayClient:
         except Exception:
             pass  # Local server might not support this yet
 
+    def _collect_compute_locally(self) -> Dict[str, Any]:
+        """Gather CPU / memory / load / disk in-process.
+
+        Previously this only ran in the HTTP-failure fallback, and the
+        HTTP `/stats` endpoint's own subprocess-based gathering would
+        sometimes return all-None values (e.g. when `ps -A -o %cpu=`
+        failed to parse cleanly, or the `vm_stat` subprocess shape
+        changed). The TUI ended up showing "Overall —", "CPU —", etc.
+        even on healthy relays.
+
+        Doing the gather here in Python instead of out-of-process is
+        both more reliable and faster. Memory is read via sysctl +
+        vm_stat on Darwin, /proc/meminfo on Linux; the rest is stdlib
+        (shutil.disk_usage, os.getloadavg, os.cpu_count).
+        """
+        import shutil, os as _os, subprocess as _sp, sys as _sys
+        try:
+            cpu_count = _os.cpu_count() or 1
+        except Exception:
+            cpu_count = 1
+        try:
+            load1, load5, load15 = _os.getloadavg()
+        except Exception:
+            load1, load5, load15 = 0.0, 0.0, 0.0
+        normalized = round((load1 / cpu_count) * 100, 1) if cpu_count else 0.0
+
+        memory_stats: Dict[str, Any] = {}
+        try:
+            if _sys.platform == "darwin":
+                # macOS — total from `sysctl hw.memsize`, used pages
+                # parsed out of `vm_stat`. Same approach the HTTP /stats
+                # endpoint uses but moved here so a /stats failure
+                # doesn't blank out the field.
+                total_raw = _sp.run(["sysctl", "-n", "hw.memsize"], capture_output=True, text=True, timeout=2)
+                page_raw = _sp.run(["sysctl", "-n", "hw.pagesize"], capture_output=True, text=True, timeout=2)
+                vm_raw = _sp.run(["vm_stat"], capture_output=True, text=True, timeout=2)
+                if total_raw.returncode == 0 and page_raw.returncode == 0 and vm_raw.returncode == 0:
+                    total_bytes = int(total_raw.stdout.strip())
+                    page_size = int(page_raw.stdout.strip())
+                    pages = {}
+                    for line in vm_raw.stdout.splitlines():
+                        if ":" not in line: continue
+                        k, v = line.split(":", 1)
+                        try:
+                            pages[k.strip()] = int(v.strip().rstrip(".").replace(".", ""))
+                        except ValueError: continue
+                    # "free" in macOS terms = free + inactive (inactive
+                    # is reclaimable). Wired + active + compressed is
+                    # effectively in-use.
+                    free_pages = pages.get("Pages free", 0) + pages.get("Pages inactive", 0)
+                    free_bytes = free_pages * page_size
+                    used_bytes = total_bytes - free_bytes
+                    memory_stats = {
+                        "total_bytes": total_bytes,
+                        "used_bytes": used_bytes,
+                        "free_bytes": free_bytes,
+                        "percent": round((used_bytes / total_bytes) * 100, 1) if total_bytes else 0.0,
+                    }
+            elif _sys.platform.startswith("linux"):
+                with open("/proc/meminfo") as f:
+                    fields: Dict[str, int] = {}
+                    for line in f:
+                        parts = line.split(":")
+                        if len(parts) != 2: continue
+                        try:
+                            fields[parts[0].strip()] = int(parts[1].strip().split()[0]) * 1024
+                        except ValueError: continue
+                total_bytes = fields.get("MemTotal", 0)
+                avail_bytes = fields.get("MemAvailable", fields.get("MemFree", 0))
+                used_bytes = total_bytes - avail_bytes
+                memory_stats = {
+                    "total_bytes": total_bytes,
+                    "used_bytes": used_bytes,
+                    "free_bytes": avail_bytes,
+                    "percent": round((used_bytes / total_bytes) * 100, 1) if total_bytes else 0.0,
+                }
+        except Exception:
+            memory_stats = {}
+
+        disk_stats: Dict[str, Any] = {}
+        try:
+            d = shutil.disk_usage("/")
+            disk_stats = {
+                "total_bytes": d.total,
+                "used_bytes": d.used,
+                "free_bytes": d.free,
+                "percent": round((d.used / d.total) * 100, 1) if d.total else 0.0,
+            }
+        except Exception:
+            pass
+
+        return {
+            "cpu_percent": normalized,  # load-normalized — usable as CPU% proxy on both OSes
+            "cpu_count": cpu_count,
+            "memory": memory_stats,
+            "load": {"one": round(load1, 2), "five": round(load5, 2), "fifteen": round(load15, 2), "normalized_percent": normalized},
+            "disk": disk_stats,
+        }
+
     async def _local_stats_loop(self):
         """Poll the local bridge for workload and compute stats."""
         interval = 5 if self.tui else 30  # Fast polling only when TUI is active
         while self._running:
+            # Always gather compute locally — much more reliable than
+            # the HTTP /stats subprocess-based gather, which has been
+            # observed returning all-None values for cpu/mem/disk on
+            # otherwise-healthy relays (TUI showing "Overall —" the
+            # whole session). The HTTP endpoint is still useful for
+            # agent/workflow data; compute we own here.
+            compute_local = self._collect_compute_locally()
             try:
                 await asyncio.sleep(interval)
                 async with httpx.AsyncClient() as client:
@@ -1816,7 +1922,7 @@ class RelayClient:
                     server_running=True,
                     agent_counts=data.get("agent_counts", {}),
                     workflow_summary=data.get("workflow_summary", {}),
-                    compute=data.get("compute", {}),
+                    compute=compute_local,
                     # Full per-agent list — used by the Runtime tab's
                     # session-list view (one row per live agent, arrow-
                     # nav between them). Same shape as agent_manager.list()
@@ -1849,29 +1955,12 @@ class RelayClient:
                         fallback_rows.append(a)
                 except Exception:
                     pass
-                try:
-                    import shutil, os as _os
-                    cpu_count = _os.cpu_count() or 1
-                    load1, _, _ = _os.getloadavg()
-                    disk = shutil.disk_usage("/")
-                    fallback_compute = {
-                        "cpu_percent": round((load1 / cpu_count) * 100, 1),
-                        "memory": {},
-                        "load": {"one": round(load1, 2), "normalized_percent": round((load1 / cpu_count) * 100, 1)},
-                        "disk": {"percent": round((disk.used / disk.total) * 100, 1), "free_bytes": disk.free, "total_bytes": disk.total},
-                    }
-                    self._tui_update(
-                        server_running=False,
-                        compute=fallback_compute,
-                        agent_counts=fallback_counts,
-                        agent_rows=fallback_rows,
-                    )
-                except Exception:
-                    self._tui_update(
-                        server_running=False,
-                        agent_counts=fallback_counts,
-                        agent_rows=fallback_rows,
-                    )
+                self._tui_update(
+                    server_running=False,
+                    compute=compute_local,
+                    agent_counts=fallback_counts,
+                    agent_rows=fallback_rows,
+                )
                 await self._refresh_cerver_session_rows()
 
     async def _refresh_cerver_session_rows(self):
