@@ -13,7 +13,7 @@ import signal
 import subprocess
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 
 from fastapi import HTTPException
@@ -125,9 +125,28 @@ class LocalAgentManager:
                     # sg_b703c2a2 — but 50 is enough headroom for now.
     STALE_TIMEOUT = 3600  # Agents idle for 1 hour are considered stale
 
+    # Window (seconds) that completed/failed one-shot agents linger in
+    # the recent-history buffer so the relay TUI's Runtime tab can
+    # show them. The active `_agents` dict is freed immediately on
+    # complete_on_exit (so MAX_AGENTS slots reopen for the next burst);
+    # this separate buffer is observation-only — looked at by `list()`
+    # for the TUI / stats endpoint, not by the active-management code.
+    # 90s is long enough to catch a typical `cerver run` cycle (cold
+    # boot + run + display) without piling up forever in long-running
+    # relays.
+    RECENT_HISTORY_TTL_SECONDS = 90
+    RECENT_HISTORY_MAX = 30
+
     def __init__(self):
         self._agents: Dict[str, LocalAgent] = {}
         self._output_tasks: Dict[str, asyncio.Task] = {}
+        # Recently-completed one-shot agents, kept around so the
+        # Runtime tab in the relay TUI shows recent activity instead
+        # of "0 agents" between cerver run invocations. Each entry is
+        # a dict in the same shape `list()` returns for active agents,
+        # plus an `_evicted_at` timestamp the trimming logic uses.
+        from collections import deque
+        self._recent_completed: deque = deque(maxlen=self.RECENT_HISTORY_MAX)
 
     def cleanup_stale_agents(self) -> int:
         """Remove agents that are completed, failed, or stale. Returns count removed."""
@@ -681,6 +700,29 @@ class LocalAgentManager:
             # cleanup pass could free the slot. One-shot agents have no
             # reason to linger after exit; their session_id is already
             # nulled above.
+            #
+            # BUT — before popping, snapshot the agent into the recent-
+            # history buffer so the Runtime tab in the relay TUI can show
+            # "you just ran codex 12s ago" instead of "0 agents". The
+            # buffer is observation-only, separate from `_agents`, so the
+            # MAX_AGENTS slot is still freed immediately for the next
+            # provisioning request.
+            self._recent_completed.append({
+                "id": agent.id,
+                "task_id": agent.task_id,
+                "task_number": agent.task_number,
+                "task_title": agent.task_title,
+                "status": agent.status,
+                "type": "local",
+                "cli_tool": agent.cli_tool,
+                "branch": agent.branch,
+                "worktree_path": agent.worktree_path,
+                "created_at": agent.created_at.isoformat(),
+                "last_activity": datetime.now().isoformat(),
+                "session_id": None,
+                "can_resume": False,
+                "_evicted_at": datetime.now(),
+            })
             self._agents.pop(agent.id, None)
             output_task = self._output_tasks.pop(agent.id, None)
             if output_task is not None and not output_task.done():
@@ -1427,8 +1469,12 @@ class LocalAgentManager:
         }
 
     def list(self) -> List[dict]:
-        """List all agents."""
-        return [
+        """List all agents — active (running/paused/prepared) plus recently
+        completed/failed one-shots that haven't aged out of the TTL window.
+        The TUI's Runtime tab shows both so a relay handling lots of short
+        cerver-run calls doesn't look idle between bursts.
+        """
+        active = [
             {
                 "id": a.id,
                 "task_id": a.task_id,
@@ -1446,6 +1492,20 @@ class LocalAgentManager:
             }
             for a in self._agents.values()
         ]
+        # Trim aged-out entries from the recent-completed buffer. Done
+        # lazily on read instead of via a background task — the buffer
+        # is bounded anyway (RECENT_HISTORY_MAX) so unbounded growth
+        # isn't a risk; this just keeps the rendered list short.
+        now = datetime.now()
+        ttl_cutoff = now - timedelta(seconds=self.RECENT_HISTORY_TTL_SECONDS)
+        while self._recent_completed and self._recent_completed[0].get("_evicted_at") < ttl_cutoff:
+            self._recent_completed.popleft()
+        # Strip the internal `_evicted_at` field before returning so the
+        # TUI / stats consumers see the same shape they did before this
+        # change — RECENT_HISTORY is an internal mechanism, not a new
+        # API surface.
+        recent = [{k: v for k, v in entry.items() if not k.startswith("_")} for entry in self._recent_completed]
+        return active + recent
 
     async def resume_session(self, agent_id: str, message: str, image_paths: List[str] = None, pre_logged: bool = False) -> bool:
         """Resume an agent session with a follow-up message.

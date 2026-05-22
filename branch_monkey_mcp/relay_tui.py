@@ -1682,6 +1682,20 @@ class RelayTUI:
         paused = int(agent_counts.get("paused", 0) or 0)
         prepared = int(agent_counts.get("prepared", 0) or 0)
         total_live = running + paused + prepared
+        # Per-CLI breakdown of currently-running agents so the user can
+        # see "1 codex · 1 claude" instead of just "2 running" without
+        # reading every row below. Derived from agent_rows (which the
+        # local stats endpoint always sends alongside agent_counts) —
+        # the dedicated /stats route does this server-side too, but
+        # doing it client-side here means the TUI gets a consistent
+        # breakdown even on the in-process-fallback path.
+        cli_breakdown: dict = {}
+        for row in (s.get("agent_rows") or []):
+            if not isinstance(row, dict): continue
+            if row.get("status") != "running": continue
+            cli = (row.get("cli_tool") or "?").strip() or "?"
+            cli_breakdown[cli] = cli_breakdown.get(cli, 0) + 1
+        cli_summary = "  ".join(f"{n} {name}" for name, n in sorted(cli_breakdown.items()))
         self._put(stdscr, y, lbl_col, "Live agents", self._dim())
         # Lead with the running count in bold so the actual live load is
         # one glance — "how many CLIs are this machine driving right now?"
@@ -1689,11 +1703,14 @@ class RelayTUI:
         # the first number ("0 run") and concludes nothing's happening.
         running_attr = self._bold() | (self._green() if running > 0 else 0)
         self._put(stdscr, y, val_col, f"{running}", running_attr)
+        rest = f"running  ·  {paused} paused  ·  {prepared} ready  ·  {total_live} total"
+        if cli_summary:
+            rest += f"   ({cli_summary})"
         self._put(
             stdscr,
             y,
             val_col + max(2, len(str(running)) + 1),
-            f"running  ·  {paused} paused  ·  {prepared} ready  ·  {total_live} total",
+            rest,
             self._dim(),
         )
         y += 1
