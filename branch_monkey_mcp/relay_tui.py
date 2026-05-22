@@ -1706,9 +1706,13 @@ class RelayTUI:
 
         agent_counts = s.get("agent_counts", {})
         running = int(agent_counts.get("running", 0) or 0)
-        paused = int(agent_counts.get("paused", 0) or 0)
+        # Relay internals still use `paused`/`ready` as separate counts,
+        # but to the user both mean the same thing ("not running, the
+        # CLI's session_id is saved, next input resumes"). Match the
+        # gateway-side `resting` vocabulary by collapsing them.
+        resting = int(agent_counts.get("paused", 0) or 0) + int(agent_counts.get("ready", 0) or 0)
         prepared = int(agent_counts.get("prepared", 0) or 0)
-        total_live = running + paused + prepared
+        total_live = running + resting + prepared
         # Per-CLI breakdown of currently-running agents so the user can
         # see "1 codex · 1 claude" instead of just "2 running" without
         # reading every row below. Derived from agent_rows (which the
@@ -1730,7 +1734,7 @@ class RelayTUI:
         # the first number ("0 run") and concludes nothing's happening.
         running_attr = self._bold() | (self._green() if running > 0 else 0)
         self._put(stdscr, y, val_col, f"{running}", running_attr)
-        rest = f"running  ·  {paused} paused  ·  {prepared} ready  ·  {total_live} total"
+        rest = f"running  ·  {resting} resting  ·  {prepared} ready  ·  {total_live} total"
         if cli_summary:
             rest += f"   ({cli_summary})"
         self._put(
@@ -1784,16 +1788,23 @@ class RelayTUI:
                 aid = str(row.get("id") or "")
                 focused = self._focused_field_key() == f"session_{aid}"
                 rev = curses.A_REVERSE if focused else 0
-                status = str(row.get("status") or "?")
+                raw_status = str(row.get("status") or "?")
                 cli = str(row.get("cli_tool") or "—")
-                # Status dot color so a glance tells you who's actively
-                # working vs idle vs broken.
+                # Display the relay's internal vocabulary using the
+                # gateway-side `resting` term — same concept (idle CLI
+                # whose session_id is saved), one word across both
+                # tables. Internals (gating in agent_manager,
+                # cerver_compute, agents.py) keep their original
+                # paused/ready/completed names.
+                status = {
+                    "paused": "resting",
+                    "ready": "resting",
+                    "completed": "resting",
+                }.get(raw_status, raw_status)
                 status_color = {
                     "running": self._green() | self._bold(),
-                    "paused":  self._cyan(),
-                    "ready":   self._yellow(),
+                    "resting": self._yellow(),
                     "prepared": self._dim(),
-                    "completed": self._dim(),
                     "failed":  self._red() | self._bold(),
                     "stopped": self._dim(),
                 }.get(status, self._dim())
@@ -1810,7 +1821,7 @@ class RelayTUI:
                 detail_parts = []
                 if sid:
                     detail_parts.append(f"sid:{sid[:8]}")
-                if status in ("paused", "ready"):
+                if status == "resting":
                     idle = self._format_relative_time(row.get("last_activity"))
                     detail_parts.append(f"idle {idle}")
                 detail = "  ·  ".join(detail_parts)
