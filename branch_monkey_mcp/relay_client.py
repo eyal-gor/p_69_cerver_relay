@@ -1699,6 +1699,16 @@ class RelayClient:
         # requiring restarts. Same loop the dual-mode path uses.
         self._update_check_task = asyncio.create_task(self._update_check_loop())
         self._infisical_refresh_task = asyncio.create_task(self._infisical_refresh_loop())
+        # Stats loop drives the Runtime tab's "Live agents" + COMPUTE
+        # rows in the TUI. Was previously only started in the full
+        # connect() path, so cerver-only relays (which is the default
+        # install) showed all dashes for compute + 0 for agents
+        # forever. The loop's HTTP fetch fails gracefully on cerver-
+        # only (no local bridge), but compute is gathered in-process
+        # via _collect_compute_locally() and agent counts come from
+        # the in-process agent_manager fallback, so the loop is
+        # useful here too.
+        self._local_stats_task = asyncio.create_task(self._local_stats_loop())
 
         try:
             while self._running:
