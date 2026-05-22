@@ -305,8 +305,17 @@ class RelayTUI:
                 last_draw = 0.0  # Force redraw after key press
 
     def _handle_key(self, key, stdscr=None):
-        # Onboarding mode (text input active, only Ctrl-C quits)
+        # Quit confirmation modal — takes over keyboard until resolved.
+        # Sits AT THE TOP so a pending quit can resolve from any state,
+        # including mid-wizard (the wizard handlers below can trigger
+        # this prompt themselves on 'q'; this ordering lets the user
+        # pick yes/no without the wizard intercepting their answer).
         s = self.state
+        if s.get("quit_prompt") == "pending":
+            self._handle_quit_prompt_key(key)
+            return
+
+        # Onboarding mode (text input active, only Ctrl-C quits)
         if s.get("onboarding_needed") and s["auth_state"] not in ("authenticating", "waiting"):
             self._handle_onboarding_key(key, stdscr)
             return
@@ -319,14 +328,6 @@ class RelayTUI:
         # Launchd prompt mode
         if s.get("launchd_prompt") == "pending":
             self._handle_launchd_prompt_key(key)
-            return
-
-        # Quit confirmation modal — takes over keyboard until resolved.
-        # Sits AFTER the wizard prompts above so it can't fire while
-        # the user is mid-onboarding (those modes have their own quit
-        # paths via Ctrl-C / Esc; double-confirming would just be noise).
-        if s.get("quit_prompt") == "pending":
-            self._handle_quit_prompt_key(key)
             return
 
         # Machine name editing mode
@@ -906,6 +907,14 @@ class RelayTUI:
             self._hline(stdscr, y, col, bar_w)
             y += 2
 
+        # Quit confirmation modal — drawn FIRST so it overlays whatever
+        # state the user was in (auth / onboarding / wizard / etc.).
+        # Without this, pressing `q` during a wizard set quit_prompt=
+        # "pending" but the wizard kept rendering on top of it.
+        if s.get("quit_prompt") == "pending":
+            self._draw_quit_prompt(stdscr, y, col, bar_w)
+            return
+
         # Auth screen (takes over dashboard while authenticating)
         if s["auth_state"] in ("authenticating", "waiting"):
             self._draw_auth(stdscr, y, col, bar_w)
@@ -924,12 +933,6 @@ class RelayTUI:
         # CLI selection prompt (after launchd, or when [C] pressed)
         if s.get("cli_prompt") == "pending":
             self._draw_cli_prompt(stdscr, y, col, bar_w)
-            return
-
-        # Quit confirmation modal — last so it overlays whatever the
-        # user was looking at, but never collides with the wizards.
-        if s.get("quit_prompt") == "pending":
-            self._draw_quit_prompt(stdscr, y, col, bar_w)
             return
 
         # Version — number of commits in the relay repo (bumps every commit)
@@ -2084,6 +2087,15 @@ class RelayTUI:
             self._onboarding_cursor = len(self._onboarding_input)
             self._onboarding_initialized = True
 
+        # `q`/`Q` opens the quit confirmation modal even mid-onboarding.
+        # Directory paths almost never contain the letter q literally,
+        # so treating it as a quit shortcut is the right tradeoff; if
+        # someone really needs a `q` in their path, they can paste it.
+        if key in (ord("q"), ord("Q")):
+            self._quit_selected = 1
+            self.state["quit_prompt"] = "pending"
+            return
+
         if key in (curses.KEY_ENTER, 10, 13):  # Enter — accept
             path = self._onboarding_input.strip()
             if path:
@@ -2181,6 +2193,12 @@ class RelayTUI:
 
     def _handle_launchd_prompt_key(self, key):
         """Handle keyboard input during launchd prompt."""
+        # `q`/`Q` opens the quit confirmation modal so the user is
+        # never trapped on this screen.
+        if key in (ord("q"), ord("Q")):
+            self._quit_selected = 1
+            self.state["quit_prompt"] = "pending"
+            return
         if key in (curses.KEY_UP, ord("k")):
             self._launchd_selected = max(0, self._launchd_selected - 1)
         elif key in (curses.KEY_DOWN, ord("j")):
@@ -2302,6 +2320,15 @@ class RelayTUI:
         installed = [n for n, p in providers.items() if p.get("installed")]
         not_installed = [n for n, p in providers.items() if not p.get("installed")]
         all_names = list(providers.keys())
+
+        # `q`/`Q` opens the quit confirmation modal — but only when
+        # NOT in the api_key text-input sub-mode (where 'q' could be
+        # a legitimate character in a vendor key). Esc backs out of
+        # that sub-mode first; then q quits.
+        if key in (ord("q"), ord("Q")) and self._cli_auth_mode != "api_key":
+            self._quit_selected = 1
+            self.state["quit_prompt"] = "pending"
+            return
 
         # --- API key input sub-mode ---
         if self._cli_auth_mode == "api_key":
