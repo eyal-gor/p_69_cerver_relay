@@ -1625,6 +1625,14 @@ class RelayTUI:
             self._hline(stdscr, y, col, bar_w)
             y += 2
 
+        # Quit modal must render BEFORE the tab body, otherwise pressing
+        # q sets quit_prompt=pending but nothing visible changes (the
+        # renderer kept painting agent rows). Same fix as Connect /
+        # Provision / Network got earlier.
+        if s.get("quit_prompt") == "pending":
+            self._draw_quit_prompt(stdscr, y, col, bar_w)
+            return
+
         # Machine identity moved to the Provision tab — Runtime is just
         # the work-side config now: Home (where it runs) and AI CLI
         # (what runs it), both focusable via Up/Down/Enter.
@@ -1929,6 +1937,12 @@ class RelayTUI:
         y += 1
         self._hline(stdscr, y, col, bar_w)
         y += 2
+
+        # Quit modal overlay — render BEFORE the help body so pressing q
+        # actually shows the confirmation dialog.
+        if s.get("quit_prompt") == "pending":
+            self._draw_quit_prompt(stdscr, y, col, bar_w)
+            return
 
         # ── Section helpers ─────────────────────────────────────
         # Keep section rendering compact since the page is content-
@@ -2612,6 +2626,12 @@ class RelayTUI:
         self._put(stdscr, 1, col, "Logs", self._bold())
         self._put(stdscr, 1, col + bar_w - 10, "[L] Toggle", self._cyan())
         self._hline(stdscr, 2, col, bar_w)
+
+        # Quit modal — render BEFORE the log body so pressing q on
+        # the Logs tab actually shows the confirmation dialog.
+        if self.state.get("quit_prompt") == "pending":
+            self._draw_quit_prompt(stdscr, 4, col, bar_w)
+            return
 
         # Log lines
         all_lines = self._stdout_capture.get_lines(500)
