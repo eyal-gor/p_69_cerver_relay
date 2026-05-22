@@ -1842,12 +1842,20 @@ class RelayTUI:
                 metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
                 cli = str(metadata.get("cli_tool") or row.get("harness") or "—")
                 status = str(row.get("status") or "?")
+                # Gateway-side normalized status as of cerver-ai ~e1c03dc:
+                # running / resting / failed / archived. Older statuses
+                # (ready/idle/completed/terminated) kept as aliases so a
+                # client running pre-rename code paths still gets colored
+                # rows.
                 status_color = {
                     "running": self._green() | self._bold(),
+                    "resting": self._yellow(),
+                    "failed": self._red() | self._bold(),
+                    "archived": self._dim(),
+                    # Legacy aliases — same colors as their new equivalents.
                     "ready": self._yellow(),
                     "idle": self._yellow(),
-                    "completed": self._dim(),
-                    "failed": self._red() | self._bold(),
+                    "completed": self._yellow(),
                     "terminated": self._dim(),
                 }.get(status, self._dim())
                 self._put(stdscr, y, lbl_col, "●", status_color | rev)
