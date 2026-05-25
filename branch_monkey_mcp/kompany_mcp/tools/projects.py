@@ -97,6 +97,71 @@ def kompany_org_list() -> str:
 
 
 @mcp.tool()
+def kompany_project_create(
+    name: str,
+    description: str = "",
+    organization_id: str = "",
+    git_remote_url: str = "",
+    focus: bool = True,
+) -> str:
+    """Create a new cloud project and (by default) focus it.
+
+    This creates the project record in the Kompany cloud (kompany.dev) so it
+    immediately shows up in `kompany_project_list` and can hold domains,
+    machines, metrics, tasks, etc. It does NOT create a local folder — use
+    `kompany_project_create_folder` for that, then link via git_remote_url.
+
+    Args:
+        name: Project display name (e.g. "p_91_leave_safe_zone").
+        description: Optional short description.
+        organization_id: Org UUID to create the project under. Defaults to the
+            authenticated org. Use `kompany_org_list` to see options.
+        git_remote_url: Optional git remote to associate with the project.
+        focus: Whether to focus the new project after creating it (default: True).
+
+    Returns:
+        The created project's name and ID.
+    """
+    try:
+        org_id = organization_id or state.ORG_ID
+        if not org_id:
+            return (
+                "❌ No organization_id available. Pass one explicitly or run "
+                "`kompany_org_list` to find your org ID."
+            )
+
+        payload = {
+            "name": name,
+            "description": description,
+            "organization_id": org_id,
+        }
+        if git_remote_url:
+            payload["git_remote_url"] = git_remote_url
+
+        result = api_post("/api/projects", payload)
+        project = result.get("project", {})
+        project_id = project.get("id")
+
+        if not project_id:
+            return f"❌ Project creation returned no ID. Response: {result}"
+
+        focus_note = ""
+        if focus:
+            state.CURRENT_PROJECT_ID = str(project_id)
+            state.CURRENT_PROJECT_NAME = project.get("name", name)
+            focus_note = "\n\n🎯 This project is now focused — all operations are scoped to it."
+
+        return f"""# ✅ Project Created
+
+**Project:** {project.get('name', name)}
+**ID:** `{project_id}`
+**Org:** `{org_id}`{focus_note}"""
+
+    except Exception as e:
+        return f"Error creating project: {str(e)}"
+
+
+@mcp.tool()
 def kompany_project_create_folder(
     base_path: str,
     project_name: str,
