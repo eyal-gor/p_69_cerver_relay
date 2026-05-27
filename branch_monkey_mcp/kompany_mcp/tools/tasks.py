@@ -88,6 +88,10 @@ def kompany_task_create(
 ) -> str:
     """Create a new task in the current project.
 
+    If `version` is omitted, the task is filed under the project's latest
+    version (i.e. today's daily plan), not the backlog. Pass `version`
+    explicitly only to override that default.
+
     Requires a project to be focused first using kompany_project_focus.
     """
     if not state.CURRENT_PROJECT_ID:
@@ -99,9 +103,13 @@ def kompany_task_create(
             "description": description,
             "status": status,
             "priority": priority,
-            "version": version or "backlog",
             "project_id": state.CURRENT_PROJECT_ID
         }
+        # Only send an explicit version. When omitted, let the backend default
+        # the task to the project's latest version (today's daily plan) rather
+        # than forcing "backlog" and stranding every agent/MCP-created task.
+        if version:
+            data["version"] = version
         if machine_id:
             data["machine_id"] = machine_id
 
