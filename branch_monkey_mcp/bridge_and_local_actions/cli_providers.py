@@ -310,14 +310,87 @@ class CliProvider:
     def normalize_event(self, raw_json: dict) -> Optional[dict]:
         """Normalize a JSON output event to the common format.
 
+        Each provider subclass parses its CLI's wire format and emits
+        events in this shared vocabulary so downstream consumers (the
+        gateway transcript, cerver-cli's WaitForReply loop, the dashboard
+        renderer) never need a CLI-specific code path.
+
         Common format follows Claude Code's stream-json structure:
+
         - {"type": "system", "subtype": "init", "session_id": "..."}
-        - {"type": "assistant", "message": {"content": [{"type": "text", "text": "..."}]}}
-        - {"type": "result", "result": "..."}
+            Once per session, on CLI start. session_id is the native
+            CLI session id (used for native --resume).
+
+        - {"type": "assistant",
+           "message": {"content": [{"type": "text", "text": "..."}]}}
+            Assistant text turn. Tool-using agents emit several of these
+            interleaved with tool_use / tool_result.
+
+        - {"type": "assistant",
+           "message": {"content": [{"type": "tool_use",
+                                    "name": "...", "input": {...}}]}}
+            Tool invocation by the model.
+
+        - {"type": "tool_result", "content": "..."}
+            Tool's response back to the model.
+
+        - {"type": "result", "result": "...", "usage": {...}}
+            END OF ONE TURN (not the session). The CLI may keep running
+            and accept more input. Codex's `turn.completed` maps here.
+
+        - {"type": "session_completed",
+           "exit_code": int, "duration_ms": int,
+           "total_usage": {input_tokens, output_tokens, turns}}
+            END OF THE CLI PROCESS. The single deterministic "this
+            session is fully over, no more events" signal. Synthesized
+            by the supervisor on `subprocess.wait()` return — none of
+            the CLIs emit this themselves; process exit IS the signal.
+            See `make_session_completed_event()` for the constructor.
+            Downstream consumers should prefer this over transcript
+            quiescence heuristics. exit_code 0 = success.
 
         Returns None to skip/filter the event.
         """
         return raw_json
+
+    # Synthetic event constructors -----------------------------------
+    # These are produced by the supervisor, not by parsing CLI stdout.
+    # Centralized here so the wire shape stays identical across CLIs
+    # and across emission sites (one supervisor today, possibly several
+    # tomorrow). Adapters that need to vary any field can override.
+
+    @staticmethod
+    def make_session_completed_event(
+        exit_code: int,
+        duration_ms: int,
+        total_usage: Optional[dict] = None,
+    ) -> dict:
+        """Construct the canonical session_completed event.
+
+        Called by the process supervisor when the CLI subprocess exits.
+        Push the returned dict into the transcript the same way per-turn
+        events flow. This is the signal cerver-cli watches for to know
+        the run is truly over — replacing the quiescence-based timeout
+        heuristic that was tuned per-CLI and still missed slow codex runs.
+
+        Args:
+            exit_code: Process exit code. 0 = success, non-zero = error.
+            duration_ms: Wall-clock CLI lifetime in milliseconds, from
+                spawn to exit.
+            total_usage: Aggregated token counts across all turns. Shape:
+                {"input_tokens": int, "output_tokens": int, "turns": int}.
+                Pass None when the supervisor didn't track per-turn
+                usage; consumers must treat absence as "unknown," not
+                zero.
+        """
+        event: dict = {
+            "type": "session_completed",
+            "exit_code": int(exit_code),
+            "duration_ms": int(duration_ms),
+        }
+        if total_usage is not None:
+            event["total_usage"] = total_usage
+        return event
 
     def extract_session_id(self, event: dict) -> Optional[str]:
         """Extract session ID from an init event, if present."""
