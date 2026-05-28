@@ -680,44 +680,62 @@ class LocalAgentManager:
         # via /agents) pause instead so the user's next message resumes them.
         # The signal is `complete_on_exit`, not callback presence — chats now
         # also carry callbacks (for stream publishing) but must NOT complete.
+        # Emit the deterministic session_completed signal to the transcript
+        # UNCONDITIONALLY when the CLI subprocess exits — not gated on
+        # complete_on_exit the way the original PR #12 did it. Two reasons
+        # the gate was wrong in practice:
+        #
+        #   1. cerver-cli's `run` command intentionally stopped setting
+        #      metadata.complete_on_exit (see cerver-cli cmd/run.go's
+        #      "used to live here" comment about resumes). So the gate
+        #      was always False for `cerver run` sessions today —
+        #      exactly the case that motivated this work item. Result:
+        #      PR #12 shipped, but the emission never fired in real use
+        #      and PR #5's watch path on cerver-cli was never exercised.
+        #      Verified empirically: codex session d65760c4 had 21
+        #      transcript entries, zero of kind session_completed.
+        #
+        #   2. session_completed represents "the CLI subprocess exited"
+        #      — a fact about the process. complete_on_exit is about
+        #      in-memory pool record retention (still useful below).
+        #      The two concerns are orthogonal.
+        #
+        # For interactive chat sessions that respawn a new CLI subprocess
+        # per turn (claude --print / codex exec / grok), this means one
+        # session_completed event per turn-boundary. That's actually
+        # correct: cerver-cli's `--resume` path needs exactly that
+        # "this turn's CLI handed control back" signal. Consumers that
+        # care about whole-session-end vs turn-end can correlate by
+        # session_id (multiple session_completed events on one session
+        # = multiple turns; one = one-shot).
+        #
+        # Push happens BEFORE the complete_on_exit cleanup block so the
+        # agent.callback is still wired (transcript-push target lookup
+        # reads from there).
+        duration_ms = int(
+            (datetime.now() - agent.created_at).total_seconds() * 1000
+        )
+        session_completed_event = CliProvider.make_session_completed_event(
+            exit_code=agent.exit_code if agent.exit_code is not None else 0,
+            duration_ms=duration_ms,
+            total_usage=getattr(agent, "usage_cumulative", None),
+        )
+        self._post_transcript_entries(
+            agent,
+            [{
+                "role": "system",
+                "kind": "session_completed",
+                # Content is the JSON-serialized event so the gateway's
+                # transcript model (which only carries role/kind/content/at)
+                # can still ferry the structured payload. Consumers parse
+                # content as JSON when they need exit_code / duration_ms /
+                # total_usage; the kind alone is enough to trigger "done."
+                "content": json.dumps(session_completed_event),
+            }],
+        )
+
         if agent.complete_on_exit:
             agent.status = "completed" if agent.exit_code == 0 else "failed"
-
-            # Push the deterministic session_completed signal to the
-            # transcript BEFORE clearing session_id / firing callbacks /
-            # tearing down — this is the canonical "the CLI process
-            # actually exited" event downstream consumers (cerver-cli's
-            # WaitForReply, dashboards, future replay tooling) watch
-            # for. Replaces the per-CLI quiescence/timeout heuristics
-            # that worked for claude but truncated long codex runs.
-            # See cli_providers.CliProvider.make_session_completed_event
-            # for the contract. Only fires for complete_on_exit agents
-            # (one-shot run / cron); interactive chat agents pause +
-            # resume across many subprocess lifecycles so per-spawn
-            # emission would be semantically wrong — for them, `result`
-            # already marks each turn boundary.
-            duration_ms = int(
-                (datetime.now() - agent.created_at).total_seconds() * 1000
-            )
-            session_completed_event = CliProvider.make_session_completed_event(
-                exit_code=agent.exit_code if agent.exit_code is not None else 0,
-                duration_ms=duration_ms,
-                total_usage=getattr(agent, "usage_cumulative", None),
-            )
-            self._post_transcript_entries(
-                agent,
-                [{
-                    "role": "system",
-                    "kind": "session_completed",
-                    # Content is the JSON-serialized event so the gateway's
-                    # transcript model (which only carries role/kind/content/at)
-                    # can still ferry the structured payload. Consumers parse
-                    # content as JSON when they need exit_code / duration_ms /
-                    # total_usage; the kind alone is enough to trigger "done."
-                    "content": json.dumps(session_completed_event),
-                }],
-            )
-
             agent.session_id = None  # Don't keep session — allows cleanup
             print(f"[LocalAgent] One-shot agent {agent.id} {agent.status} (exit={agent.exit_code})")
 
