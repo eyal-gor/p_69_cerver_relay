@@ -682,6 +682,42 @@ class LocalAgentManager:
         # also carry callbacks (for stream publishing) but must NOT complete.
         if agent.complete_on_exit:
             agent.status = "completed" if agent.exit_code == 0 else "failed"
+
+            # Push the deterministic session_completed signal to the
+            # transcript BEFORE clearing session_id / firing callbacks /
+            # tearing down — this is the canonical "the CLI process
+            # actually exited" event downstream consumers (cerver-cli's
+            # WaitForReply, dashboards, future replay tooling) watch
+            # for. Replaces the per-CLI quiescence/timeout heuristics
+            # that worked for claude but truncated long codex runs.
+            # See cli_providers.CliProvider.make_session_completed_event
+            # for the contract. Only fires for complete_on_exit agents
+            # (one-shot run / cron); interactive chat agents pause +
+            # resume across many subprocess lifecycles so per-spawn
+            # emission would be semantically wrong — for them, `result`
+            # already marks each turn boundary.
+            duration_ms = int(
+                (datetime.now() - agent.created_at).total_seconds() * 1000
+            )
+            session_completed_event = CliProvider.make_session_completed_event(
+                exit_code=agent.exit_code if agent.exit_code is not None else 0,
+                duration_ms=duration_ms,
+                total_usage=getattr(agent, "usage_cumulative", None),
+            )
+            self._post_transcript_entries(
+                agent,
+                [{
+                    "role": "system",
+                    "kind": "session_completed",
+                    # Content is the JSON-serialized event so the gateway's
+                    # transcript model (which only carries role/kind/content/at)
+                    # can still ferry the structured payload. Consumers parse
+                    # content as JSON when they need exit_code / duration_ms /
+                    # total_usage; the kind alone is enough to trigger "done."
+                    "content": json.dumps(session_completed_event),
+                }],
+            )
+
             agent.session_id = None  # Don't keep session — allows cleanup
             print(f"[LocalAgent] One-shot agent {agent.id} {agent.status} (exit={agent.exit_code})")
 
