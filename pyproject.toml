@@ -52,6 +52,10 @@ branch-monkey-mcp = "branch_monkey_mcp.kompany_mcp:main"
 branch-monkey-proxy = "branch_monkey_mcp.dev_proxy:main"
 kompany-workflow = "branch_monkey_mcp.workflow:main"
 
+# kompany CLI — bulk/shell-friendly companion to the MCP. Same auth,
+# same endpoints, designed for xargs pipes (see branch_monkey_mcp/kompany_cli.py).
+kompany = "branch_monkey_mcp.kompany_cli:main"
+
 [project.urls]
 Homepage      = "https://cerver.ai"
 Repository    = "https://github.com/eyal-gor/p_69_cerver_relay"
