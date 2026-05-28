@@ -720,6 +720,23 @@ class LocalAgentManager:
             duration_ms=duration_ms,
             total_usage=getattr(agent, "usage_cumulative", None),
         )
+        # TEMP debug — surface what's happening with the session_completed
+        # push so we can find why it's not landing in the transcript.
+        # Removed after the bug is diagnosed.
+        try:
+            cb = agent.callback or {}
+            print(
+                f"[session_completed] EMIT agent={agent.id} "
+                f"cerver_session_id={cb.get('cerver_session_id')!r} "
+                f"has_url={bool(cb.get('cerver_url'))} "
+                f"has_token={bool(cb.get('cerver_api_token'))} "
+                f"transport_active={get_active_transport() is not None} "
+                f"complete_on_exit={agent.complete_on_exit} "
+                f"exit_code={agent.exit_code} duration_ms={duration_ms}",
+                flush=True,
+            )
+        except Exception as _dbg_exc:
+            print(f"[session_completed] debug-print failed: {_dbg_exc}", flush=True)
         self._post_transcript_entries(
             agent,
             [{
@@ -733,6 +750,19 @@ class LocalAgentManager:
                 "content": json.dumps(session_completed_event),
             }],
         )
+        # TEMP debug — dump push_stats RIGHT AFTER scheduling the task, so
+        # we can see whether the entry was even queued (dedup, empty-skip)
+        # vs whether it queued and the async _push later failed.
+        try:
+            print(
+                f"[session_completed] POST-SCHEDULE agent={agent.id} "
+                f"push_stats={dict(agent._push_stats)} "
+                f"last_push_url={agent._last_push_url!r} "
+                f"last_errors={agent._push_errors[-2:] if agent._push_errors else []}",
+                flush=True,
+            )
+        except Exception as _dbg_exc:
+            print(f"[session_completed] debug-print-2 failed: {_dbg_exc}", flush=True)
 
         if agent.complete_on_exit:
             agent.status = "completed" if agent.exit_code == 0 else "failed"
