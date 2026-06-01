@@ -628,12 +628,13 @@ class LocalAgentManager:
         # extract_result_from_output_buffer intentionally ignores that empty
         # result and falls back to prior assistant text so we don't append a
         # bogus "[cli_exit] ... no assistant message" after a valid answer.
+        final_flush_task = None
         try:
             final_text = self._extract_result(agent)
             exit_failed = bool(agent.exit_code and agent.exit_code != 0)
 
             if final_text and not exit_failed:
-                self._post_transcript_entries(
+                final_flush_task = self._post_transcript_entries(
                     agent,
                     [{"role": "assistant", "kind": "text", "content": final_text}],
                 )
@@ -673,7 +674,7 @@ class LocalAgentManager:
                 if raw_tail:
                     diag_parts.append(f"last raw output:\n{raw_tail}")
 
-                self._post_transcript_entries(
+                final_flush_task = self._post_transcript_entries(
                     agent,
                     [{
                         "role": "assistant",
@@ -683,6 +684,9 @@ class LocalAgentManager:
                 )
         except Exception as exc:
             print(f"[LocalAgent] final flush to cerver failed: {exc}")
+
+        if final_flush_task is not None:
+            await final_flush_task
 
         # One-shot agents (cron / run-agent) complete on exit and clear their
         # session so they don't linger in the pool. Interactive agents (chat
@@ -729,7 +733,7 @@ class LocalAgentManager:
             duration_ms=duration_ms,
             total_usage=getattr(agent, "usage_cumulative", None),
         )
-        self._post_transcript_entries(
+        session_completed_task = self._post_transcript_entries(
             agent,
             [{
                 "role": "system",
@@ -742,6 +746,8 @@ class LocalAgentManager:
                 "content": json.dumps(session_completed_event),
             }],
         )
+        if session_completed_task is not None:
+            await session_completed_task
 
         if agent.complete_on_exit:
             agent.status = "completed" if agent.exit_code == 0 else "failed"
@@ -1240,7 +1246,7 @@ class LocalAgentManager:
                 f"HTTP {last_status}"
             )
 
-    def _post_transcript_entries(self, agent: LocalAgent, entries: list) -> None:
+    def _post_transcript_entries(self, agent: LocalAgent, entries: list):
         """Fire-and-forget POST of transcript entries to cerver.
 
         Signature dedup runs HERE (not just in _push_event_to_cerver) so
@@ -1368,9 +1374,9 @@ class LocalAgentManager:
             print(f"[LocalAgent] transcript push {err}")
 
         try:
-            asyncio.create_task(_push())
+            return asyncio.create_task(_push())
         except Exception:
-            pass
+            return None
 
     def _push_event_to_cerver(self, agent: LocalAgent, event: Dict) -> None:
         """Push one CLI stream event to cerver as transcript entries.
