@@ -604,7 +604,6 @@ class LocalAgentManager:
         # Read loop ended (EOF, exception, or watchdog terminate). Stop
         # the watchdog before it possibly fires a second SIGTERM on an
         # already-exiting process.
-        print(f"[debug] post-loop entered for agent={agent.id} cli={agent.cli_tool} exit_code={agent.exit_code} status={agent.status}", flush=True)
         watchdog_task.cancel()
 
         if agent.process:
@@ -743,7 +742,6 @@ class LocalAgentManager:
                 "content": json.dumps(session_completed_event),
             }],
         )
-        print(f"[debug] session_completed scheduled for agent={agent.id}", flush=True)
 
         if agent.complete_on_exit:
             agent.status = "completed" if agent.exit_code == 0 else "failed"
