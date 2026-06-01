@@ -733,7 +733,7 @@ class LocalAgentManager:
             duration_ms=duration_ms,
             total_usage=getattr(agent, "usage_cumulative", None),
         )
-        session_completed_task = self._post_transcript_entries(
+        await self._post_transcript_entries_now(
             agent,
             [{
                 "role": "system",
@@ -746,8 +746,6 @@ class LocalAgentManager:
                 "content": json.dumps(session_completed_event),
             }],
         )
-        if session_completed_task is not None:
-            await session_completed_task
 
         if agent.complete_on_exit:
             agent.status = "completed" if agent.exit_code == 0 else "failed"
@@ -1377,6 +1375,72 @@ class LocalAgentManager:
             return asyncio.create_task(_push())
         except Exception:
             return None
+
+    async def _post_transcript_entries_now(self, agent: LocalAgent, entries: list) -> None:
+        """Awaited transcript POST for control-plane markers.
+
+        `session_completed` is not just transcript decoration; cerver-cli
+        waits on it to know a run is truly finished. Keep this path direct
+        and awaited so short CLI runs cannot return before the marker lands.
+        """
+        if not entries:
+            return
+
+        target = await self._resolve_cerver_target(agent)
+        if target is None:
+            agent._push_stats["drops"] += len(entries)
+            return
+
+        import httpx
+        agent._push_stats["pushed"] += len(entries)
+        url = f"{target['url'].rstrip('/')}/v2/sessions/{target['session_id']}/transcript"
+        agent._last_push_url = url
+        backoffs = [0.2, 0.4, 0.8, 1.5, 2.5]
+        attempts = 0
+        last_status: Optional[int] = None
+        last_body = ""
+        last_exc: Optional[Exception] = None
+
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                while True:
+                    attempts += 1
+                    try:
+                        resp = await client.post(
+                            url,
+                            json={"entries": entries},
+                            headers={
+                                "Authorization": f"Bearer {target['token']}",
+                                "Content-Type": "application/json",
+                            },
+                        )
+                        last_status = resp.status_code
+                        last_body = resp.text[:300] if resp.text else ""
+                        if resp.status_code < 300:
+                            agent._push_stats["http_2xx"] += len(entries)
+                            return
+                        retryable = resp.status_code == 404 or resp.status_code >= 500
+                    except (httpx.RequestError, httpx.TimeoutException) as exc:
+                        last_exc = exc
+                        retryable = True
+                    if not retryable or attempts > len(backoffs):
+                        break
+                    await asyncio.sleep(backoffs[attempts - 1])
+        except Exception as exc:
+            last_exc = exc
+
+        if last_exc is not None:
+            agent._push_stats["http_exc"] += len(entries)
+            err = f"exc({attempts}x) {url}: {type(last_exc).__name__}: {last_exc}"
+        elif last_status is not None and last_status < 500:
+            agent._push_stats["http_4xx"] += len(entries)
+            err = f"{last_status}({attempts}x) {url}: {last_body}"
+        else:
+            agent._push_stats["http_5xx"] += len(entries)
+            err = f"{last_status}({attempts}x) {url}: {last_body}"
+        agent._push_errors.append(err)
+        agent._push_errors[:] = agent._push_errors[-5:]
+        print(f"[LocalAgent] transcript push {err}")
 
     def _push_event_to_cerver(self, agent: LocalAgent, event: Dict) -> None:
         """Push one CLI stream event to cerver as transcript entries.
