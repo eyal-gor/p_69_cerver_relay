@@ -9,6 +9,7 @@ import asyncio
 import hashlib
 import json
 import os
+import select
 import signal
 import subprocess
 import uuid
@@ -536,9 +537,17 @@ class LocalAgentManager:
 
         def read_line():
             try:
-                if agent.process and agent.process.stdout:
-                    line = agent.process.stdout.readline()
-                    return line
+                process = agent.process
+                stdout = process.stdout if process else None
+                if not process or not stdout:
+                    return b''
+                fd = stdout.fileno()
+                while agent.status == "running":
+                    ready, _, _ = select.select([fd], [], [], 0.5)
+                    if ready:
+                        return stdout.readline()
+                    if process.poll() is not None:
+                        return b''
                 return b''
             except Exception:
                 return b''
