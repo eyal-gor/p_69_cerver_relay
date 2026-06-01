@@ -72,6 +72,15 @@ def _verify_xai(creds: Dict[str, str]) -> Tuple[bool, str]:
     return (r.status_code == 200, f"HTTP {r.status_code}")
 
 
+def _verify_google(creds: Dict[str, str]) -> Tuple[bool, str]:
+    r = httpx.get(
+        "https://generativelanguage.googleapis.com/v1beta/openai/models",
+        headers={"Authorization": f"Bearer {creds['GEMINI_API_KEY']}"},
+        timeout=10,
+    )
+    return (r.status_code == 200, f"HTTP {r.status_code}")
+
+
 def _verify_vercel(creds: Dict[str, str]) -> Tuple[bool, str]:
     r = httpx.get(
         "https://api.vercel.com/v2/user",
@@ -131,6 +140,16 @@ PROVIDERS: Dict[str, Dict] = {
             {"key": "XAI_API_KEY", "label": "API Key", "hidden": True},
         ],
         "verify": _verify_xai,
+    },
+    "gemma": {
+        "kind": "model",
+        "display_name": "Gemma (Google)",
+        "tagline": "Gemma open models — free",
+        "credentials_url": "https://aistudio.google.com/apikey",
+        "secrets": [
+            {"key": "GEMINI_API_KEY", "label": "API Key (AIza...)", "hidden": True},
+        ],
+        "verify": _verify_google,
     },
 
     # ─── Compute providers — supply the sandbox the session runs in ─

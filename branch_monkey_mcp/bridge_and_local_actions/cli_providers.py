@@ -1139,12 +1139,105 @@ class GrokProvider(CliProvider):
         return text.startswith(noise_prefixes) or any(s in text for s in noise_substrings)
 
 
+class GemmaProvider(CliProvider):
+    """Google Gemma provider (free, rate-limited via the Gemini API).
+
+    Like GrokProvider, there's no vendor CLI binary: we run the bundled
+    `gemma_runner` Python module, which hits Google's OpenAI-compatible
+    endpoint and emits claude stream-json. Because the runner ships inside
+    the relay package, the provider is *always* installed — availability
+    is purely a matter of whether the user has a Gemini API key.
+    """
+
+    name = "gemma"
+    display_name = "Gemma"
+    install_hint = "no install needed — runs via the hosted Gemini API (free)"
+    api_key_env = "GEMINI_API_KEY"
+    api_key_config = "gemini_api_key"
+
+    # The runner is part of this package, so the model is reachable as long
+    # as Python is. Return the interpreter path so get_provider() treats us
+    # as installed and never falls back to claude.
+    def is_available(self) -> Optional[str]:
+        return sys.executable
+
+    def health_check(self) -> dict:
+        # No binary to probe — report healthy if we can resolve a key.
+        auth = self.get_auth_status()
+        return {
+            "ok": auth.get("authenticated", False),
+            "path": sys.executable,
+            "detail": auth.get("detail", "bundled runner"),
+        }
+
+    def get_auth_status(self) -> dict:
+        """Gemma auth is purely a Gemini API key (stored, vault, or env)."""
+        config = _load_config()
+        if config.get(self.api_key_config):
+            key = config[self.api_key_config]
+            hint = key[:6] + "..." + key[-4:] if len(key) > 10 else "***"
+            return {"authenticated": True, "method": "api_key", "detail": f"API key ({hint})"}
+
+        env_key = os.environ.get(self.api_key_env) or os.environ.get("GOOGLE_API_KEY")
+        if env_key:
+            hint = env_key[:6] + "..." + env_key[-4:] if len(env_key) > 10 else "***"
+            return {"authenticated": True, "method": "api_key", "detail": f"API key from env ({hint})"}
+
+        return {"authenticated": False, "method": "none", "detail": "No API key — get one free at aistudio.google.com/apikey"}
+
+    def _gemma_command(self, prompt, output_format, model=None, system_prompt=None):
+        auth_env = self.get_auth_env()
+        args = [
+            sys.executable, "-m",
+            "branch_monkey_mcp.bridge_and_local_actions.gemma_runner",
+            "-p", prompt,
+            "--output-format", output_format,
+        ]
+        if output_format == "stream-json":
+            args.append("--verbose")
+        if model:
+            args.extend(["--model", model])
+        if system_prompt:
+            args.extend(["--append-system-prompt", system_prompt])
+        # Drop CLAUDECODE so nested launches behave; inject the Gemini key so
+        # the runner sees it regardless of how the relay env was assembled.
+        return CliCommand(
+            args=args,
+            env_overrides={"CLAUDECODE": None},
+            env_inject={**(auth_env if auth_env else {})},
+        )
+
+    def build_run_command(self, prompt, system_prompt=None, model=None):
+        return self._gemma_command(prompt, "stream-json", model=model, system_prompt=system_prompt)
+
+    def build_text_command(self, prompt, system_prompt=None, use_mcp=False):
+        return self._gemma_command(prompt, "text", system_prompt=system_prompt)
+
+    def build_resume_command(self, prompt, session_id):
+        # Gemini is stateless w.r.t. session_id — chat-style resume is a
+        # cerver-level concern (the relay re-feeds the prior transcript each
+        # turn), so a resume behaves like a fresh run. Mirrors GrokProvider.
+        return self._gemma_command(prompt, "stream-json")
+
+    def build_oneshot_command(self, prompt):
+        return self._gemma_command(prompt, "json")
+
+    def extract_session_id(self, event):
+        if event.get("type") == "system" and event.get("subtype") == "init":
+            return event.get("session_id")
+        return None
+
+    def is_noise(self, text):
+        return text.startswith(("warn:", "Warning:", "DeprecationWarning"))
+
+
 # --- Provider Registry ---
 
 _PROVIDERS: Dict[str, CliProvider] = {
     "claude": ClaudeCodeProvider(),
     "codex": CodexProvider(),
     "grok": GrokProvider(),
+    "gemma": GemmaProvider(),
 }
 
 # Fallback default when no persistent config exists
