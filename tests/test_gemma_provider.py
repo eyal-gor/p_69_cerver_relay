@@ -151,6 +151,29 @@ def test_sanitize_key_strips_nonascii_when_no_aiza_match():
 
 
 # ---------------------------------------------------------------------------
+# Runner: <thought> stripping (Gemma 4 leaks its reasoning into the answer)
+# ---------------------------------------------------------------------------
+
+def test_strip_thought_removes_leading_block():
+    raw = "<thought>The user wants X.\nPlan: do X.</thought>working"
+    assert gemma_runner._strip_thought(raw) == "working"
+
+
+def test_strip_thought_handles_leading_whitespace_and_thinking_tag():
+    assert gemma_runner._strip_thought("  <thinking>hmm</thinking>\n\nhi") == "hi"
+
+
+def test_strip_thought_leaves_plain_text_untouched():
+    assert gemma_runner._strip_thought("just an answer") == "just an answer"
+
+
+def test_strip_thought_only_strips_leading_block():
+    # A later mention of the tag in the body must survive.
+    raw = "<thought>reason</thought>see the <thought> tag in this sentence"
+    assert gemma_runner._strip_thought(raw) == "see the <thought> tag in this sentence"
+
+
+# ---------------------------------------------------------------------------
 # Runner: no-key guard (offline — runs before any HTTP)
 # ---------------------------------------------------------------------------
 
@@ -192,7 +215,13 @@ def _patch_urlopen(monkeypatch, payload, captured):
 
 
 _OPENAI_PAYLOAD = {
-    "choices": [{"message": {"content": "Hello from Gemma"}, "finish_reason": "stop"}],
+    # Leading <thought> block mimics real Gemma 4 output — must be stripped.
+    "choices": [
+        {
+            "message": {"content": "<thought>plan the reply</thought>Hello from Gemma"},
+            "finish_reason": "stop",
+        }
+    ],
     "usage": {"prompt_tokens": 11, "completion_tokens": 7, "total_tokens": 18},
 }
 
