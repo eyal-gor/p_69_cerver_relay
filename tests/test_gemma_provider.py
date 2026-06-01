@@ -96,7 +96,7 @@ def test_auth_status_from_stored_config(monkeypatch):
 
 def test_build_run_command_invokes_runner_with_model(monkeypatch):
     monkeypatch.setattr(GemmaProvider, "get_auth_env", lambda self: {})
-    cmd = GemmaProvider().build_run_command("hello world", model="gemma-3-27b-it")
+    cmd = GemmaProvider().build_run_command("hello world", model="gemma-4-31b-it")
     assert cmd.args[0] == sys.executable
     assert cmd.args[1] == "-m"
     assert cmd.args[2] == _RUNNER_MODULE
@@ -104,7 +104,7 @@ def test_build_run_command_invokes_runner_with_model(monkeypatch):
     assert "stream-json" in cmd.args
     # model override threads through to the runner's --model flag
     assert "--model" in cmd.args
-    assert cmd.args[cmd.args.index("--model") + 1] == "gemma-3-27b-it"
+    assert cmd.args[cmd.args.index("--model") + 1] == "gemma-4-31b-it"
     # nested launches need CLAUDECODE removed
     assert cmd.env_overrides == {"CLAUDECODE": None}
 

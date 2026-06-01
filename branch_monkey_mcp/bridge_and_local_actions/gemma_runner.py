@@ -25,7 +25,7 @@ import sys
 import urllib.error
 import urllib.request
 
-DEFAULT_MODEL = "gemma-3-27b-it"
+DEFAULT_MODEL = "gemma-4-31b-it"
 DEFAULT_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai"
 
 
