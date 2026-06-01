@@ -25,8 +25,19 @@ import sys
 import urllib.error
 import urllib.request
 
-DEFAULT_MODEL = "gemma-3-27b-it"
+DEFAULT_MODEL = "gemma-4-31b-it"
 DEFAULT_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai"
+
+
+_THOUGHT_RE = re.compile(r"^\s*<(thought|thinking)>.*?</\1>\s*", re.DOTALL | re.IGNORECASE)
+
+
+def _strip_thought(text: str) -> str:
+    """Gemma 4 prepends its reasoning as a leading <thought>...</thought>
+    block that otherwise leaks into the visible answer. Strip a single
+    leading block; leave any later content (and answers without one)
+    untouched."""
+    return _THOUGHT_RE.sub("", text, count=1)
 
 
 def _emit(event: dict) -> None:
@@ -147,6 +158,7 @@ def _run() -> int:
     final_text = ""
     if choices and isinstance(choices[0], dict):
         final_text = str((choices[0].get("message") or {}).get("content") or "")
+    final_text = _strip_thought(final_text)
 
     # OpenAI usage → claude-style usage keys the relay/gateway expect on
     # the `result` event (input_tokens / output_tokens).

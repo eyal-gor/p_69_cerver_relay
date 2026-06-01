@@ -96,7 +96,7 @@ def test_auth_status_from_stored_config(monkeypatch):
 
 def test_build_run_command_invokes_runner_with_model(monkeypatch):
     monkeypatch.setattr(GemmaProvider, "get_auth_env", lambda self: {})
-    cmd = GemmaProvider().build_run_command("hello world", model="gemma-3-27b-it")
+    cmd = GemmaProvider().build_run_command("hello world", model="gemma-4-31b-it")
     assert cmd.args[0] == sys.executable
     assert cmd.args[1] == "-m"
     assert cmd.args[2] == _RUNNER_MODULE
@@ -104,7 +104,7 @@ def test_build_run_command_invokes_runner_with_model(monkeypatch):
     assert "stream-json" in cmd.args
     # model override threads through to the runner's --model flag
     assert "--model" in cmd.args
-    assert cmd.args[cmd.args.index("--model") + 1] == "gemma-3-27b-it"
+    assert cmd.args[cmd.args.index("--model") + 1] == "gemma-4-31b-it"
     # nested launches need CLAUDECODE removed
     assert cmd.env_overrides == {"CLAUDECODE": None}
 
@@ -151,6 +151,29 @@ def test_sanitize_key_strips_nonascii_when_no_aiza_match():
 
 
 # ---------------------------------------------------------------------------
+# Runner: <thought> stripping (Gemma 4 leaks its reasoning into the answer)
+# ---------------------------------------------------------------------------
+
+def test_strip_thought_removes_leading_block():
+    raw = "<thought>The user wants X.\nPlan: do X.</thought>working"
+    assert gemma_runner._strip_thought(raw) == "working"
+
+
+def test_strip_thought_handles_leading_whitespace_and_thinking_tag():
+    assert gemma_runner._strip_thought("  <thinking>hmm</thinking>\n\nhi") == "hi"
+
+
+def test_strip_thought_leaves_plain_text_untouched():
+    assert gemma_runner._strip_thought("just an answer") == "just an answer"
+
+
+def test_strip_thought_only_strips_leading_block():
+    # A later mention of the tag in the body must survive.
+    raw = "<thought>reason</thought>see the <thought> tag in this sentence"
+    assert gemma_runner._strip_thought(raw) == "see the <thought> tag in this sentence"
+
+
+# ---------------------------------------------------------------------------
 # Runner: no-key guard (offline — runs before any HTTP)
 # ---------------------------------------------------------------------------
 
@@ -192,7 +215,13 @@ def _patch_urlopen(monkeypatch, payload, captured):
 
 
 _OPENAI_PAYLOAD = {
-    "choices": [{"message": {"content": "Hello from Gemma"}, "finish_reason": "stop"}],
+    # Leading <thought> block mimics real Gemma 4 output — must be stripped.
+    "choices": [
+        {
+            "message": {"content": "<thought>plan the reply</thought>Hello from Gemma"},
+            "finish_reason": "stop",
+        }
+    ],
     "usage": {"prompt_tokens": 11, "completion_tokens": 7, "total_tokens": 18},
 }
 
