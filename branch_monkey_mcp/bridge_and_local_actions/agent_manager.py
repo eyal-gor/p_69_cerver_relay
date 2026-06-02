@@ -1616,6 +1616,7 @@ class LocalAgentManager:
                 "status": a.status,
                 "type": "local",
                 "cli_tool": a.cli_tool,
+                "cli_model": a.cli_model,
                 "branch": a.branch,
                 "worktree_path": a.worktree_path,
                 "created_at": a.created_at.isoformat(),
