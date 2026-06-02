@@ -1790,6 +1790,7 @@ class RelayTUI:
                 rev = curses.A_REVERSE if focused else 0
                 raw_status = str(row.get("status") or "?")
                 cli = str(row.get("cli_tool") or "—")
+                model = str(row.get("cli_model") or "").strip()
                 # Display the relay's internal vocabulary using the
                 # gateway-side `resting` term — same concept (idle CLI
                 # whose session_id is saved), one word across both
@@ -1819,6 +1820,11 @@ class RelayTUI:
                 # idle-since for paused/ready rows. Truncate to fit.
                 sid = str(row.get("session_id") or "")
                 detail_parts = []
+                # Lead with the model so the user sees which model this
+                # agent was spawned with (e.g. `cerver compare claude/opus
+                # … claude/sonnet …`). Empty = the CLI's local default.
+                if model:
+                    detail_parts.append(f"model {model}")
                 if sid:
                     detail_parts.append(f"sid:{sid[:8]}")
                 if status == "resting":
@@ -1852,6 +1858,7 @@ class RelayTUI:
                 rev = curses.A_REVERSE if focused else 0
                 metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
                 cli = str(metadata.get("cli_tool") or row.get("harness") or "—")
+                model = str(metadata.get("cli_model") or "").strip()
                 status = str(row.get("status") or "?")
                 # Gateway-side normalized status as of cerver-ai ~e1c03dc:
                 # running / resting / failed / archived. Older statuses
@@ -1875,6 +1882,11 @@ class RelayTUI:
                 self._put(stdscr, y, lbl_col + 25, status[:10], status_color | rev)
                 self._put(stdscr, y, lbl_col + 36, self._format_relative_time(row.get("updatedAt"))[:10], self._dim() | rev)
                 name = str(row.get("sessionName") or row.get("task") or row.get("title") or "")
+                # Surface the model alongside the session name so a row
+                # reads "model opus · <name>" — the model the harness ran
+                # with. Empty cli_model = the CLI's local default.
+                if model:
+                    name = f"model {model} · {name}" if name else f"model {model}"
                 name_w = max(0, session_w - (lbl_col + 48))
                 self._put(stdscr, y, lbl_col + 48, name[:name_w], self._dim() | rev)
                 y += 1
