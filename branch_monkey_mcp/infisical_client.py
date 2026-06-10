@@ -151,10 +151,75 @@ async def get_secrets(force: bool = False) -> Dict[str, str]:
 def get_secrets_sync() -> Dict[str, str]:
     """Sync wrapper for spawn paths that aren't async-ready.
 
-    Returns the most recent cache without refreshing — call get_secrets()
-    on a timer (or from relay startup) to keep the cache warm.
+    Returns the cache when warm. When the cache is EMPTY but Infisical
+    is configured, does a blocking fetch instead of returning {} — a
+    fresh sandbox relay can receive its first agent spawn within ~3s
+    of boot, before the async refresh loop's initial fetch lands. On a
+    user's Mac that race is masked by CLI OAuth; in a sandbox there is
+    no OAuth, so an empty cache means the agent spawns keyless and
+    dies with "Not logged in". Cold-start attempts are rate-limited so
+    a vaultless project doesn't pay a fetch per spawn.
     """
+    global _cache, _cache_at, _last_sync_attempt
+    if _cache:
+        return dict(_cache)
+    cfg = _config()
+    if not cfg or httpx is None:
+        return {}
+    now = time.time()
+    if now - _last_sync_attempt < 30:
+        return {}
+    _last_sync_attempt = now
+    fetched = _fetch_secrets_blocking(cfg)
+    if fetched:
+        _cache = fetched
+        _cache_at = time.time()
+        print(f"[infisical] cold-start sync fetch cached {len(_cache)} secret(s)")
     return dict(_cache)
+
+
+_last_sync_attempt = 0.0
+
+
+def _fetch_secrets_blocking(cfg: Dict[str, str]) -> Dict[str, str]:
+    """Synchronous mirror of _login + _fetch_secrets for spawn paths.
+
+    Uses httpx's sync client so it's safe to call from non-async code
+    (and from threads with no running loop). 10s ceiling total.
+    """
+    try:
+        with httpx.Client(timeout=10) as client:
+            token = cfg["token"]
+            if not token.startswith("st."):
+                if not cfg["client_id"]:
+                    return {}
+                r = client.post(
+                    f"{cfg['base_url']}/api/v1/auth/universal-auth/login",
+                    json={"clientId": cfg["client_id"], "clientSecret": cfg["token"]},
+                )
+                if r.status_code != 200:
+                    print(f"[infisical] sync login failed: {r.status_code} {r.text[:200]}")
+                    return {}
+                token = r.json().get("accessToken") or ""
+                if not token:
+                    return {}
+            r = client.get(
+                f"{cfg['base_url']}/api/v3/secrets/raw",
+                params={"workspaceId": cfg["project_id"], "environment": cfg["env"]},
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            if r.status_code != 200:
+                print(f"[infisical] sync fetch failed: {r.status_code} {r.text[:200]}")
+                return {}
+            secrets = r.json().get("secrets") or []
+            return {
+                s["secretKey"]: s.get("secretValue", "")
+                for s in secrets
+                if isinstance(s, dict) and s.get("secretKey")
+            }
+    except Exception as exc:
+        print(f"[infisical] sync fetch error: {exc}")
+        return {}
 
 
 def is_configured() -> bool:
