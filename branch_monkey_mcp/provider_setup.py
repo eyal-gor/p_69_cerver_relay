@@ -109,6 +109,135 @@ def _verify_daytona(creds: Dict[str, str]) -> Tuple[bool, str]:
     return (r.status_code == 200, f"HTTP {r.status_code}")
 
 
+# ─── Local model setup (Ollama) ──────────────────────────────────
+# Unlike the hosted providers, Ollama isn't a key you paste into
+# Infisical — it's a binary + model weights on THIS machine. So its
+# "setup" installs the binary (with consent), makes sure the server is
+# up, and pulls a model. Nothing leaves the box; nothing is pushed.
+
+import platform
+import shutil
+import subprocess
+import time
+
+
+def _ollama_server_up(base: str = "http://localhost:11434") -> bool:
+    try:
+        r = httpx.get(f"{base}/api/tags", timeout=3)
+        return r.status_code == 200
+    except Exception:
+        return False
+
+
+def _install_ollama_binary() -> bool:
+    """Install the ollama binary, asking consent first. Returns True if
+    it's available afterward."""
+    if shutil.which("ollama"):
+        return True
+
+    system = platform.system()
+    if system == "Darwin":
+        cmd = (
+            ["brew", "install", "ollama"]
+            if shutil.which("brew")
+            else ["sh", "-c", "curl -fsSL https://ollama.com/install.sh | sh"]
+        )
+    elif system == "Linux":
+        cmd = ["sh", "-c", "curl -fsSL https://ollama.com/install.sh | sh"]
+    else:
+        print(f"  {ERROR}Automatic install isn't supported on {system}.{NC}")
+        print(f"  {MUTED}Download it from {ACCENT}https://ollama.com/download{NC}{MUTED}, then re-run this.{NC}")
+        return False
+
+    print(f"  {MUTED}Will run:{NC} {ACCENT}{' '.join(cmd)}{NC}")
+    if input(f"  {BOLD}Install Ollama now? [y/N]:{NC} ").strip().lower() != "y":
+        print(f"  {MUTED}Skipped install.{NC}")
+        return False
+
+    print(f"  {MUTED}Installing Ollama…{NC}")
+    try:
+        # No capture — let the installer stream its own progress.
+        result = subprocess.run(cmd, timeout=600)
+    except Exception as e:
+        print(f"  {ERROR}Install failed: {e}{NC}")
+        return False
+    if result.returncode != 0 or not shutil.which("ollama"):
+        print(f"  {ERROR}Install did not complete. See output above.{NC}")
+        return False
+    print(f"  {GREEN}✓ ollama binary installed{NC}")
+    return True
+
+
+def _ensure_ollama_server() -> bool:
+    """Make sure the Ollama server is listening. Start it detached if not."""
+    if _ollama_server_up():
+        return True
+    if not shutil.which("ollama"):
+        return False
+    print(f"  {MUTED}Starting the Ollama server…{NC}")
+    try:
+        subprocess.Popen(
+            ["ollama", "serve"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except Exception as e:
+        print(f"  {ERROR}Could not start `ollama serve`: {e}{NC}")
+        return False
+    # Give it a moment to bind the port.
+    for _ in range(10):
+        if _ollama_server_up():
+            print(f"  {GREEN}✓ server up at localhost:11434{NC}")
+            return True
+        time.sleep(0.6)
+    print(f"  {ERROR}Server didn't come up. Try `ollama serve` in another terminal.{NC}")
+    return False
+
+
+def _setup_ollama(cfg: Optional[Dict[str, str]] = None) -> bool:
+    """Install Ollama (if needed), ensure it's running, and pull a model.
+
+    `cfg` is accepted for signature parity with the credential flow but
+    unused — Ollama is local, so nothing is pushed to Infisical.
+    """
+    print()
+    print(f"{BOLD}─── Ollama (local open models) ─────────────{NC}")
+    print(f"  {MUTED}Runs models on THIS machine. No API key, no per-token cost.{NC}")
+    print(f"  {MUTED}cerver reaches it because the relay runs on the same box.{NC}")
+    print()
+
+    if not _install_ollama_binary():
+        return True
+    if not _ensure_ollama_server():
+        return True
+
+    # Pick a model to pull. Keep the suggestions small/fast — this is the
+    # cheap tier. Users can pull anything from ollama.com/library later.
+    print()
+    print(f"  {MUTED}Popular small models:{NC}")
+    print(f"    {ACCENT}llama3.2{NC}      {MUTED}— Meta, 3B, fast, great default{NC}")
+    print(f"    {ACCENT}qwen2.5:7b{NC}    {MUTED}— strong general/coding{NC}")
+    print(f"    {ACCENT}gemma2:2b{NC}     {MUTED}— tiny, laptop-friendly{NC}")
+    print(f"    {ACCENT}mistral{NC}       {MUTED}— 7B, solid all-rounder{NC}")
+    model = input(f"\n  {BOLD}Model to pull [llama3.2]:{NC} ").strip() or "llama3.2"
+
+    print(f"\n  {MUTED}Pulling {model} (first pull downloads weights — can be GBs)…{NC}")
+    try:
+        result = subprocess.run(["ollama", "pull", model], timeout=3600)
+    except Exception as e:
+        print(f"  {ERROR}Pull failed: {e}{NC}")
+        return True
+    if result.returncode != 0:
+        print(f"  {ERROR}Pull failed — check the model name at ollama.com/library{NC}")
+        return True
+
+    print()
+    print(f"  {GREEN}{BOLD}✓ Ollama is ready with {model}.{NC}")
+    print(f"  {MUTED}Run it:{NC} {ACCENT}cerver run --cli ollama --model {model} \"explain this repo\"{NC}")
+    print(f"  {MUTED}Or route the cheap tier to it in a policy: {{ \"route\": {{ \"harness\": \"ollama\", \"model\": \"{model}\" }} }}{NC}")
+    return True
+
+
 PROVIDERS: Dict[str, Dict] = {
     # ─── Model providers — supply the LLM that writes the session ─
     "anthropic": {
@@ -150,6 +279,17 @@ PROVIDERS: Dict[str, Dict] = {
             {"key": "GEMINI_API_KEY", "label": "API Key (AIza...)", "hidden": True},
         ],
         "verify": _verify_google,
+    },
+
+    # ─── Local models — run on THIS machine, free (no key, no Infisical) ─
+    "ollama": {
+        "kind": "local",
+        "display_name": "Ollama",
+        "tagline": "open models on this machine — free, no key",
+        "credentials_url": "https://ollama.com",
+        "secrets": [],
+        "verify": None,
+        "setup": _setup_ollama,
     },
 
     # ─── Compute providers — supply the sandbox the session runs in ─
@@ -308,6 +448,7 @@ def add_one_provider(cfg: Dict[str, str]) -> bool:
     # Numbering stays sequential across groups so a single number picks any.
     keys = list(PROVIDERS.keys())
     model_keys   = [k for k in keys if PROVIDERS[k]["kind"] == "model"]
+    local_keys   = [k for k in keys if PROVIDERS[k]["kind"] == "local"]
     compute_keys = [k for k in keys if PROVIDERS[k]["kind"] == "compute"]
     print()
     print(f"{BOLD}Pick a provider to add:{NC}")
@@ -315,6 +456,12 @@ def add_one_provider(cfg: Dict[str, str]) -> bool:
     if model_keys:
         print(f"\n  {MUTED}MODEL PROVIDERS{NC}  {MUTED}— who writes the session{NC}")
         for k in model_keys:
+            p = PROVIDERS[k]
+            print(f"  {n}) {p['display_name']:<15} {MUTED}— {p['tagline']}{NC}")
+            n += 1
+    if local_keys:
+        print(f"\n  {MUTED}LOCAL MODELS{NC}     {MUTED}— run on this machine, free{NC}")
+        for k in local_keys:
             p = PROVIDERS[k]
             print(f"  {n}) {p['display_name']:<15} {MUTED}— {p['tagline']}{NC}")
             n += 1
@@ -330,8 +477,9 @@ def add_one_provider(cfg: Dict[str, str]) -> bool:
     if raw == "q" or raw == "":
         return False
 
-    # The ordered key list matches the displayed numbering (models first).
-    ordered_keys = model_keys + compute_keys
+    # The ordered key list matches the displayed numbering (models, then
+    # local, then compute).
+    ordered_keys = model_keys + local_keys + compute_keys
     try:
         idx = int(raw) - 1
         if idx < 0 or idx >= len(ordered_keys):
@@ -342,6 +490,14 @@ def add_one_provider(cfg: Dict[str, str]) -> bool:
         return True
 
     p = PROVIDERS[provider_key]
+
+    # Local providers (Ollama) install + pull on this machine — no
+    # credentials, no Infisical push. Hand off to their setup() callable.
+    if p.get("setup"):
+        p["setup"](cfg)
+        again = input(f"\n{BOLD}Add another provider? [y/N]:{NC} ").strip().lower()
+        return again == "y"
+
     print()
     print(f"{BOLD}─── {p['display_name']} ─────────────────────────{NC}")
     print(f"  Get credentials at: {ACCENT}{p['credentials_url']}{NC}")
