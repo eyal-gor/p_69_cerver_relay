@@ -13,6 +13,18 @@ def build_cloud_heartbeat_payload(
     local_port: int,
     status: str = "online",
 ) -> Dict[str, Any]:
+    """Build the JSON body for a cloud relay heartbeat.
+
+    Args:
+        machine_id: Stable identifier for this relay machine.
+        machine_name: Human-readable machine name shown in the cloud UI.
+        local_port: Port the relay's local HTTP server listens on, advertised
+            so the cloud knows where to forward requests back to.
+        status: Liveness status to report (defaults to ``"online"``).
+
+    Returns:
+        The heartbeat payload as a plain dict, ready to JSON-encode.
+    """
     return {
         "machine_id": machine_id,
         "machine_name": machine_name,
@@ -29,6 +41,27 @@ async def post_cloud_heartbeat(
     local_port: int,
     status: str = "online",
 ) -> Dict[str, Any]:
+    """Send a heartbeat to the cloud relay registry.
+
+    Registers (or refreshes) this machine with the cloud so it stays
+    routable for cloud-to-local request forwarding. Called periodically by
+    the relay.
+
+    Args:
+        cloud_url: Base URL of the cloud relay service.
+        access_token: Bearer token for authenticating the relay; when falsy,
+            the request is sent without an ``Authorization`` header.
+        machine_id: Stable identifier for this relay machine.
+        machine_name: Human-readable machine name shown in the cloud UI.
+        local_port: Port the relay's local HTTP server listens on.
+        status: Liveness status to report (defaults to ``"online"``).
+
+    Returns:
+        The decoded JSON response from the cloud.
+
+    Raises:
+        httpx.HTTPStatusError: If the cloud returns a non-2xx status.
+    """
     headers = {}
     if access_token:
         headers["Authorization"] = f"Bearer {access_token}"
@@ -55,6 +88,18 @@ async def post_local_heartbeat(
     machine_name: str,
     cloud_url: str,
 ) -> None:
+    """Notify the relay's own local server that the cloud link is up.
+
+    Posts to the loopback ``/api/relay/heartbeat`` endpoint so the local
+    server knows which cloud it is paired with and reflects the connected
+    state (e.g. in the relay UI). Fire-and-forget — the response is ignored.
+
+    Args:
+        local_port: Port the relay's local HTTP server listens on.
+        machine_id: Stable identifier for this relay machine.
+        machine_name: Human-readable machine name.
+        cloud_url: Base URL of the cloud this relay is connected to.
+    """
     async with httpx.AsyncClient() as client:
         await client.post(
             f"http://127.0.0.1:{local_port}/api/relay/heartbeat",
@@ -68,6 +113,15 @@ async def post_local_heartbeat(
 
 
 async def post_local_disconnect(local_port: int) -> None:
+    """Tell the relay's own local server the cloud link has gone down.
+
+    Posts to the loopback ``/api/relay/disconnect`` endpoint so the local
+    server can clear its connected state during relay shutdown or teardown.
+    Fire-and-forget — the response is ignored.
+
+    Args:
+        local_port: Port the relay's local HTTP server listens on.
+    """
     async with httpx.AsyncClient() as client:
         await client.post(
             f"http://127.0.0.1:{local_port}/api/relay/disconnect",
