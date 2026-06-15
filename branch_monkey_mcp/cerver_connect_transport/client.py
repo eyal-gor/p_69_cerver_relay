@@ -25,6 +25,23 @@ ConnectedCallback = Callable[[Dict[str, Any]], None]
 
 
 def build_cerver_connect_ws_url(cerver_url: str, compute_id: str, api_token: str = "") -> str:
+    """Build the Cerver connect websocket URL for a compute.
+
+    Upgrades the scheme of ``cerver_url`` to its websocket equivalent
+    (``https`` → ``wss``, ``http`` → ``ws``, anything else left as-is) and
+    appends the ``/v2/connect/ws`` path with the compute and token as
+    URL-encoded query parameters.
+
+    Args:
+        cerver_url: Base Cerver URL (http/https); trailing slashes are
+            stripped.
+        compute_id: Identifier of the compute opening the channel.
+        api_token: API token passed as the ``token`` query parameter; the
+            same token is also sent as a Bearer header by the caller.
+
+    Returns:
+        The fully-qualified ``ws``/``wss`` URL to connect to.
+    """
     base = cerver_url.strip().rstrip("/")
     if base.startswith("https://"):
         ws_base = "wss://" + base[len("https://") :]
@@ -37,6 +54,25 @@ def build_cerver_connect_ws_url(cerver_url: str, compute_id: str, api_token: str
 
 
 class CerverConnectTransport:
+    """Outbound websocket channel from the local runtime to Cerver.
+
+    Opens and maintains a single long-lived websocket to the hosted Cerver
+    gateway so that provider requests originating in the cloud can be
+    forwarded back to — and executed on — this private local machine. The
+    channel:
+
+    - reconnects automatically with exponential backoff (see
+      ``INITIAL_RECONNECT_DELAY`` / ``MAX_RECONNECT_DELAY``),
+    - dispatches each inbound gateway request as its own asyncio task so a
+      slow request can't block the read loop,
+    - answers ``ping`` frames and forwards ``request`` frames to the local
+      HTTP server via :func:`execute_local_request`,
+    - can push live CLI stream events back up for low-latency fan-out.
+
+    The relay runs at most one instance at a time; see
+    :func:`set_active_transport` / :func:`get_active_transport`.
+    """
+
     def __init__(
         self,
         *,
@@ -47,6 +83,19 @@ class CerverConnectTransport:
         on_status: Optional[StatusCallback] = None,
         on_connected: Optional[ConnectedCallback] = None,
     ):
+        """Initialize the transport.
+
+        Args:
+            cerver_url: Base Cerver URL the websocket is derived from.
+            api_token: API token used for the connect URL and Bearer header.
+            compute_id: Identifier of this compute, sent to the gateway.
+            local_port: Port of the relay's local HTTP server that forwarded
+                requests are executed against.
+            on_status: Optional callback invoked with status strings
+                (``"connecting"`` / ``"connected"``) as the link changes.
+            on_connected: Optional callback invoked with the gateway's
+                ``connected`` handshake payload.
+        """
         self.cerver_url = cerver_url
         self.api_token = api_token
         self.compute_id = compute_id
@@ -58,10 +107,18 @@ class CerverConnectTransport:
         self._ws: Optional[websockets.WebSocketClientProtocol] = None
 
     def _emit_status(self, status: str) -> None:
+        """Invoke the ``on_status`` callback if one was provided."""
         if self.on_status:
             self.on_status(status)
 
     async def run(self) -> None:
+        """Run the connect loop until :meth:`close` is called.
+
+        Repeatedly establishes the websocket via :meth:`_connect_once`,
+        reconnecting with exponential backoff on any error (a successful
+        connection resets the backoff). Returns once the loop is stopped or
+        the coroutine is cancelled, after closing the socket.
+        """
         self._running = True
         reconnect_attempts = 0
 
@@ -86,6 +143,12 @@ class CerverConnectTransport:
         await self.close()
 
     async def close(self) -> None:
+        """Stop the connect loop and close the websocket.
+
+        Clears the running flag so :meth:`run` exits, then closes the
+        underlying socket if open. Safe to call when already disconnected;
+        any error closing the socket is ignored.
+        """
         self._running = False
         if self._ws is not None:
             try:
@@ -95,6 +158,14 @@ class CerverConnectTransport:
             self._ws = None
 
     async def _connect_once(self) -> None:
+        """Open one websocket session and pump messages until it closes.
+
+        Connects to the Cerver connect endpoint, emits ``"connected"``, then
+        reads frames in a loop, dispatching each as its own task via
+        :meth:`_handle_message_safely` so a long-running request can't block
+        the read loop. Returns when the socket closes; raises on connection
+        errors so :meth:`run` can apply backoff and reconnect.
+        """
         ws_url = build_cerver_connect_ws_url(self.cerver_url, self.compute_id, self.api_token)
         async with websockets.connect(
             ws_url,
@@ -126,6 +197,15 @@ class CerverConnectTransport:
         self._ws = None
 
     async def _handle_message_safely(self, raw: str) -> None:
+        """Run :meth:`_handle_message`, logging and swallowing any error.
+
+        Wraps the handler so an exception in a fire-and-forget request task
+        is logged rather than surfacing as an unretrieved-task warning or
+        killing the read loop.
+
+        Args:
+            raw: Raw websocket frame text to handle.
+        """
         try:
             await self._handle_message(raw)
         except Exception as exc:
@@ -135,6 +215,16 @@ class CerverConnectTransport:
             print(f"[Cerver connect] request handler crashed: {exc}")
 
     async def _handle_message(self, raw: str) -> None:
+        """Decode and dispatch a single inbound gateway frame.
+
+        Parses ``raw`` as JSON and routes by ``type``: ``connected`` fires
+        the ``on_connected`` callback, ``ping`` replies with ``pong``, and
+        ``request`` is executed locally via :meth:`_execute_request` with the
+        response sent back. Non-JSON or unrecognized frames are ignored.
+
+        Args:
+            raw: Raw websocket frame text.
+        """
         try:
             payload = json.loads(raw)
         except json.JSONDecodeError:
@@ -157,6 +247,20 @@ class CerverConnectTransport:
         await self._send_json(response)
 
     async def _execute_request(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute a forwarded gateway request against the local server.
+
+        Translates a ``request`` frame into a local HTTP call via
+        :func:`execute_local_request` and wraps the result in a ``response``
+        frame keyed by the original ``request_id``.
+
+        Args:
+            payload: The decoded ``request`` frame, carrying ``request_id``,
+                ``method``, ``path``, ``headers``, and optional ``body``.
+
+        Returns:
+            A ``response`` frame dict with ``status``, ``headers``, and
+            ``body`` from the local server (status 500 if unset).
+        """
         request_id = payload.get("request_id")
         request = {
             "id": request_id,
@@ -176,6 +280,14 @@ class CerverConnectTransport:
         }
 
     async def _send_json(self, payload: Dict[str, Any]) -> None:
+        """JSON-encode and send a frame over the websocket.
+
+        Args:
+            payload: The frame to serialize and send.
+
+        Raises:
+            RuntimeError: If the websocket is not currently connected.
+        """
         if self._ws is None:
             raise RuntimeError("Cerver connect websocket is not connected")
         await self._ws.send(json.dumps(payload))
@@ -213,11 +325,18 @@ _active_transport: Optional["CerverConnectTransport"] = None
 
 
 def set_active_transport(transport: Optional["CerverConnectTransport"]) -> None:
+    """Register (or clear) the process-wide active transport.
+
+    Args:
+        transport: The transport to publish as active, or ``None`` to clear
+            it (e.g. on shutdown).
+    """
     global _active_transport
     _active_transport = transport
 
 
 def get_active_transport() -> Optional["CerverConnectTransport"]:
+    """Return the process-wide active transport, or ``None`` if unset."""
     return _active_transport
 
 

@@ -8,6 +8,19 @@ import httpx
 
 
 def build_local_url(local_port: int, path: str) -> str:
+    """Build the loopback URL for a cloud-forwarded request.
+
+    Cloud-forwarded requests carry only the request path; this prefixes it
+    with the relay's local HTTP server origin (always ``127.0.0.1`` so the
+    forwarded traffic never leaves the machine).
+
+    Args:
+        local_port: Port the relay's local HTTP server listens on.
+        path: Request path, including any query string (e.g. ``/api/...``).
+
+    Returns:
+        The fully-qualified loopback URL to send the request to.
+    """
     return f"http://127.0.0.1:{local_port}{path}"
 
 
