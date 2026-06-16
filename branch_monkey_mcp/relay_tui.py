@@ -27,6 +27,15 @@ class LogCapture:
     """Intercepts writes to a stream and stores them in a ring buffer."""
 
     def __init__(self, original, max_lines: int = 1000):
+        """Wrap ``original`` (a real stream) with a bounded ring buffer.
+
+        Args:
+            original: The underlying stream being intercepted (e.g.
+                ``sys.stdout``). Kept around so attribute lookups like
+                ``encoding``/``fileno`` can defer to it.
+            max_lines: Maximum number of timestamped lines to retain;
+                older lines are evicted once the buffer is full.
+        """
         self._original = original
         self._buffer: deque = deque(maxlen=max_lines)
         self._lock = threading.Lock()
@@ -34,6 +43,18 @@ class LogCapture:
         self.errors = getattr(original, "errors", "strict")
 
     def write(self, text: str) -> int:
+        """Capture ``text`` into the ring buffer, one entry per line.
+
+        Blank lines are dropped and each retained line is prefixed with
+        an ``HH:MM:SS`` timestamp. Thread-safe. Nothing is forwarded to
+        the original stream — the TUI owns the terminal, so writing
+        through would corrupt the curses display; the captured lines are
+        surfaced in the Logs tab instead.
+
+        Returns:
+            The number of characters in ``text`` (mimicking the
+            ``TextIOBase.write`` contract callers expect).
+        """
         if text and text.strip():
             ts = datetime.now().strftime("%H:%M:%S")
             with self._lock:
@@ -43,23 +64,52 @@ class LogCapture:
         return len(text) if text else 0
 
     def flush(self):
+        """No-op flush — writes land in the in-memory buffer immediately,
+        so there is nothing to flush. Present to satisfy the stream API."""
         pass
 
     def fileno(self):
+        """Return the underlying stream's file descriptor.
+
+        Deferred to the wrapped stream so code that needs a real fd
+        (e.g. ``subprocess`` redirection) still works while capture is
+        installed.
+        """
         return self._original.fileno()
 
     def isatty(self):
+        """Report as a non-TTY so libraries don't emit ANSI color codes
+        or interactive prompts into the captured log buffer."""
         return False
 
     def reconfigure(self, **kwargs):
+        """No-op stand-in for ``TextIOWrapper.reconfigure``.
+
+        Some libraries call this to set encoding/line-buffering on
+        ``sys.stdout``; the buffer has no such knobs, so the call is
+        accepted and ignored to stay drop-in compatible.
+        """
         pass
 
     def get_lines(self, limit: int = 200) -> list:
+        """Return the most recent captured lines, oldest first.
+
+        Args:
+            limit: Maximum number of trailing lines to return.
+
+        Returns:
+            A snapshot ``list`` of up to ``limit`` timestamped lines.
+            A copy is taken under the lock so the caller can iterate
+            safely while writes continue on other threads.
+        """
         with self._lock:
             return list(self._buffer)[-limit:]
 
     @property
     def closed(self):
+        """Always ``False`` — the capture stream has no closed state and
+        outlives any individual write, so consumers never treat it as
+        closed."""
         return False
 
 
@@ -69,6 +119,17 @@ class RelayTUI:
     REFRESH_MS = 2000
 
     def __init__(self):
+        """Initialize the dashboard's in-memory state and input buffers.
+
+        Sets up the big ``state`` dict that every ``_draw_*`` method reads
+        from (connection/auth/compute/agent fields, all seeded to safe
+        defaults), the stdout/stderr ``LogCapture`` wrappers, the current
+        view + scroll offsets, the text-edit buffers for the name/home
+        inline editors, the callback slots the relay wires up (``_on_*``),
+        and the rolling ``_metric_history`` deques that back the runtime
+        sparklines. No terminal is touched here — that happens in
+        :meth:`run`.
+        """
         self.state: Dict[str, Any] = {
             "version": "",
             "commit_sha": "",
@@ -234,11 +295,33 @@ class RelayTUI:
                 self._stop_callback()
 
     def stop(self):
+        """Signal the main loop to exit on its next tick.
+
+        Flips the ``_running`` flag the :meth:`_main_loop` ``while`` guard
+        checks. Safe to call from another thread (e.g. a signal handler or
+        the relay's shutdown path) — the loop exits cleanly and
+        :meth:`run` then restores the original streams.
+        """
         self._running = False
 
     # ── curses main loop ─────────────────────────────────────────────
 
     def _main_loop(self, stdscr):
+        """Curses event loop: initialize colors, then draw + poll forever.
+
+        Run via ``curses.wrapper`` (which hands in the initialized
+        ``stdscr`` and guarantees teardown). Sets up the color pairs used
+        by the ``_color`` helpers and the logo gradient, then loops until
+        :attr:`_running` clears: it redraws the active view on a cadence
+        (10 fps on the animated tabs, slower ``REFRESH_MS`` on the static
+        Help tab) and polls ``getch`` with a 100 ms timeout, dispatching
+        any key to :meth:`_handle_key`. ``curses.error`` from draws on a
+        too-small terminal is swallowed so a resize never crashes the UI.
+
+        Args:
+            stdscr: The curses standard screen provided by
+                ``curses.wrapper``.
+        """
         default_bg = -1
         try:
             curses.use_default_colors()
@@ -306,6 +389,22 @@ class RelayTUI:
                 last_draw = 0.0  # Force redraw after key press
 
     def _handle_key(self, key, stdscr=None):
+        """Route a single keypress to the right handler for the current mode.
+
+        Acts as the keyboard state machine. Modal/input modes are checked
+        first and consume the key exclusively (in priority order: quit
+        prompt, onboarding, CLI selector, launchd prompt, name editor,
+        home editor); when none is active, the key falls through to the
+        global bindings — tab navigation (digits, ←/→, ``[L]``), per-tab
+        field cursor movement (↑/↓ + Enter), view scrolling, and the
+        legacy action letters (``[N]/[H]/[S]/[C]/[D]/[V]/[Q]``).
+
+        Args:
+            key: The integer key code from ``stdscr.getch``.
+            stdscr: The curses screen, needed by actions that toggle the
+                cursor visibility (the inline text editors). May be
+                ``None`` when keys are injected outside the draw loop.
+        """
         # Quit confirmation modal — takes over keyboard until resolved.
         # Sits AT THE TOP so a pending quit can resolve from any state,
         # including mid-wizard (the wizard handlers below can trigger
@@ -616,6 +715,17 @@ class RelayTUI:
         return []
 
     def _action_edit_name(self, stdscr=None):
+        """Enter the inline machine-name editor.
+
+        Seeds the edit buffer with the current name, parks the cursor at
+        the end, and makes the hardware cursor visible. The next
+        keypresses are captured by the name-editing branch of
+        :meth:`_handle_key` until Enter (confirm) or Esc (cancel).
+
+        Args:
+            stdscr: Curses screen, used to show the cursor. ``None`` skips
+                the cursor toggle (e.g. in tests).
+        """
         self._editing_name = True
         self._name_input = self.state.get("machine_name", "")
         self._name_cursor = len(self._name_input)
@@ -623,6 +733,16 @@ class RelayTUI:
             curses.curs_set(1)
 
     def _action_edit_home(self, stdscr=None):
+        """Enter the inline home-directory editor.
+
+        Mirrors :meth:`_action_edit_name` but for the relay's default
+        working directory. The editing branch validates the path is an
+        existing directory before committing on Enter.
+
+        Args:
+            stdscr: Curses screen, used to show the cursor. ``None`` skips
+                the cursor toggle.
+        """
         self._editing_home = True
         self._home_input = self.state.get("home_dir", "")
         self._home_cursor = len(self._home_input)
@@ -630,6 +750,13 @@ class RelayTUI:
             curses.curs_set(1)
 
     def _action_toggle_launchd(self):
+        """Install or uninstall the launchd auto-start agent.
+
+        Inspects the current ``launchd`` state and calls the relay-
+        supplied ``_on_launchd_install`` callback with ``True`` to install
+        (when currently absent) or ``False`` to uninstall (when running or
+        installed). No-ops if the relay never wired up the callback.
+        """
         if not self._on_launchd_install:
             return
         ld = self.state.get("launchd")
@@ -639,6 +766,13 @@ class RelayTUI:
             self._on_launchd_install(True)
 
     def _action_pick_cli(self):
+        """Open the default-AI-CLI selector prompt.
+
+        Pre-selects the row matching the current ``default_cli`` (falling
+        back to the first installed provider) and flips ``cli_prompt`` to
+        ``"pending"`` so :meth:`_handle_key` routes subsequent keys to the
+        selector overlay.
+        """
         providers = self.state.get("cli_providers", {})
         installed = [n for n, p in providers.items() if p.get("installed")]
         current = self.state.get("default_cli", "claude")
@@ -646,6 +780,12 @@ class RelayTUI:
         self.state["cli_prompt"] = "pending"
 
     def _action_logout(self):
+        """Log out of the cerver account and tear down the TUI.
+
+        Invokes the relay's ``_on_logout`` callback (which clears local
+        credentials) then clears :attr:`_running` so the main loop exits.
+        No-ops if no logout callback was registered.
+        """
         if not self._on_logout:
             return
         self._on_logout()
@@ -828,6 +968,22 @@ class RelayTUI:
     # ── drawing helpers ──────────────────────────────────────────────
 
     def _put(self, stdscr, y, x, text, attr=0):
+        """Write ``text`` at ``(y, x)``, clipped to the screen bounds.
+
+        The single safe-write primitive every draw method funnels
+        through. Off-screen coordinates are skipped and the string is
+        truncated to the remaining row width via ``addnstr`` so writing
+        near the edge can't raise. ``curses.error`` (e.g. a write to the
+        bottom-right cell) is swallowed.
+
+        Args:
+            stdscr: Target curses window.
+            y: Row.
+            x: Column.
+            text: String to draw.
+            attr: Optional curses attribute mask (color pair / bold /
+                reverse) to apply.
+        """
         h, w = stdscr.getmaxyx()
         if 0 <= y < h and 0 <= x < w:
             try:
@@ -836,27 +992,50 @@ class RelayTUI:
                 pass
 
     def _hline(self, stdscr, y, x, length):
+        """Draw a dim horizontal rule (``\u2500``) of up to ``length`` cells.
+
+        Used as the section/divider line throughout the panels. The run
+        is clamped to the available row width so it never overflows the
+        screen edge.
+
+        Args:
+            stdscr: Target curses window.
+            y: Row to draw on.
+            x: Starting column.
+            length: Desired rule length in cells (clamped to fit).
+        """
         h, w = stdscr.getmaxyx()
         actual = min(length, w - x - 1)
         if 0 <= y < h and actual > 0:
             self._put(stdscr, y, x, "\u2500" * actual, self._dim())
 
     def _green(self):
+        """Return the green color-pair attr (0 when the terminal lacks
+        color), used for healthy/connected/success states."""
         return curses.color_pair(1) if curses.has_colors() else 0
 
     def _red(self):
+        """Return the red color-pair attr (0 without color), used for
+        errors and unhealthy states."""
         return curses.color_pair(2) if curses.has_colors() else 0
 
     def _yellow(self):
+        """Return the yellow color-pair attr (0 without color), used for
+        warnings and pending/waiting states."""
         return curses.color_pair(3) if curses.has_colors() else 0
 
     def _cyan(self):
+        """Return the cyan color-pair attr (0 without color), used for
+        keybinding labels, links, and highlighted identifiers."""
         return curses.color_pair(4) if curses.has_colors() else 0
 
     def _dim(self):
+        """Return the dim/gray attr for secondary text, falling back to
+        ``A_DIM`` when no color pairs are available."""
         return curses.color_pair(5) if curses.has_colors() else curses.A_DIM
 
     def _bold(self):
+        """Return the bold attribute (``A_BOLD``) for emphasized text."""
         return curses.A_BOLD
 
     def _version_label(self, s) -> str:
@@ -882,6 +1061,21 @@ class RelayTUI:
     # view on startup and on logout.
 
     def _draw_connect(self, stdscr, h, w):
+        """Render the Connect tab: identity, transport, and setup state.
+
+        Draws the animated logo header then the machine identity, gateway
+        connection / heartbeat status, and install state of the launchd
+        autostart + cerver CLI. Also hosts the modal overlays that surface
+        here (auth, onboarding, launchd prompt, CLI selector, quit
+        confirm) since Connect is the default landing view. Rows are
+        focusable via the field cursor; the focused row gets an "About"
+        panel and inverse-video highlight.
+
+        Args:
+            stdscr: Target curses window.
+            h: Screen height in rows.
+            w: Screen width in columns.
+        """
         s = self.state
         col = 2
         lbl_col = 4
@@ -1187,6 +1381,20 @@ class RelayTUI:
     # managed by the gateway, not by the user typing into this panel.
 
     def _draw_provision(self, stdscr, h, w):
+        """Render the Provision tab: cerver-side compute identity.
+
+        Shows the full ``compute_id`` other tools use to reference this
+        machine, the human label, provider type, and gateway connection
+        state — mostly read-only telemetry, plus a MAINTENANCE section
+        offering the in-place ``cerver update`` action. Supports vertical
+        scrolling via Shift+Up/Down (tracked in
+        :attr:`_provision_scroll_offset`).
+
+        Args:
+            stdscr: Target curses window.
+            h: Screen height in rows.
+            w: Screen width in columns.
+        """
         s = self.state
         col = 2
         lbl_col = 4
@@ -1491,6 +1699,20 @@ class RelayTUI:
     # ── network view ────────────────────────────────────────────────
 
     def _draw_network(self, stdscr, h, w):
+        """Render the Network tab: this account's compute mesh.
+
+        Draws the animated header then a scrollable table of every
+        compute registered to the account (including offline machines):
+        status, label, provider, scope, and ``compute_id``, with a summary
+        line of connected/total counts and last refresh time. The current
+        machine is marked with ``*`` and gateway errors surface inline.
+        Scrolls via Up/Down (:attr:`_network_scroll_offset`).
+
+        Args:
+            stdscr: Target curses window.
+            h: Screen height in rows.
+            w: Screen width in columns.
+        """
         s = self.state
         col = 2
         lbl_col = 4
@@ -1600,6 +1822,21 @@ class RelayTUI:
     # static during a session.
 
     def _draw_runtime(self, stdscr, h, w):
+        """Render the Runtime tab: workload and compute resources.
+
+        Sibling of Connect (shares the animated header). Shows live
+        workload — agent/workflow/request counts and the session list —
+        plus the underlying compute health (CPU / memory / load / disk
+        with sparklines and usage bars). Hosts the focusable Home and
+        default-CLI rows and a focusable row per live agent. Scrolls via
+        Shift+Up/Down (:attr:`_runtime_scroll_offset`); plain Up/Down
+        moves the field cursor.
+
+        Args:
+            stdscr: Target curses window.
+            h: Screen height in rows.
+            w: Screen width in columns.
+        """
         s = self.state
         col = 2
         lbl_col = 4
@@ -1964,6 +2201,19 @@ class RelayTUI:
     # in two keystrokes from anywhere.
 
     def _draw_help(self, stdscr, h, w):
+        """Render the Help tab: a static cheat-sheet of CLI verbs and keys.
+
+        A content-heavy reference page (Infisical setup, ``cerver`` verbs,
+        TUI keybindings, links) built from the nested ``section``/``row``/
+        ``blank`` helpers, which bail out gracefully as they approach the
+        bottom of a short terminal. No animated logo — the page is static,
+        so the main loop refreshes it on the slower cadence.
+
+        Args:
+            stdscr: Target curses window.
+            h: Screen height in rows.
+            w: Screen width in columns.
+        """
         s = self.state
         col = 2
         lbl_col = 4
@@ -1995,6 +2245,12 @@ class RelayTUI:
         desc_col = cmd_col + 34   # widest cmd: `cerver compare --clis a,b,c "..."`
 
         def section(title):
+            """Draw a bold section header + underline, advancing ``y``.
+
+            Returns ``False`` (drawing nothing) when too close to the
+            bottom of the screen, so callers can short-circuit the
+            section's rows. Returns ``True`` when the header was drawn.
+            """
             nonlocal y
             if y >= h - 4:
                 return False
@@ -2005,6 +2261,12 @@ class RelayTUI:
             return True
 
         def row(cmd, desc):
+            """Draw one help line: bold ``cmd`` plus a dim ``desc``.
+
+            The description is omitted if it would run past the right
+            edge. No-ops near the bottom of the screen so the page never
+            overruns a short terminal. Advances ``y`` by one.
+            """
             nonlocal y
             if y >= h - 3:
                 return
@@ -2014,6 +2276,7 @@ class RelayTUI:
             y += 1
 
         def blank():
+            """Advance ``y`` by one row to insert vertical spacing."""
             nonlocal y
             y += 1
 
@@ -2078,6 +2341,22 @@ class RelayTUI:
     # views anyway.
 
     def _draw_tab_footer(self, stdscr, h, w, col, lbl_col, bar_w, current):
+        """Draw the shared bottom navigation strip common to every tab.
+
+        Renders the ``[1]…[6]`` tab labels (Connect / Provision / Network
+        / Runtime / Logs / Help), highlighting the ``current`` one with
+        inverse-video so the active tab matches the in-panel row-highlight
+        style. Pulled into a helper so all tabs show an identical strip.
+
+        Args:
+            stdscr: Target curses window.
+            h: Screen height (the strip sits two rows from the bottom).
+            w: Screen width.
+            col: Left margin column for the divider rule.
+            lbl_col: Column where the first tab label starts.
+            bar_w: Width of the divider rule above the strip.
+            current: View name of the active tab, drawn highlighted.
+        """
         footer_y = h - 2
         self._hline(stdscr, footer_y - 1, col, bar_w)
         x = lbl_col
@@ -2635,6 +2914,19 @@ class RelayTUI:
         self._put(stdscr, y, x + 6, "Back", self._dim())
 
     def _draw_auth(self, stdscr, y, col, bar_w):
+        """Render the device-authorization overlay on the Connect tab.
+
+        Shows the verification URL and user code to visit while waiting
+        for approval, or a plain "Authenticating..." line before the URL
+        is issued. Drawn as part of the Connect view when the relay is
+        mid-login.
+
+        Args:
+            stdscr: Target curses window.
+            y: Starting row for the overlay.
+            col: Left margin column.
+            bar_w: Width used for the divider rule.
+        """
         s = self.state
         lbl_col = col + 2
 
@@ -2662,6 +2954,20 @@ class RelayTUI:
     # ── logs view ────────────────────────────────────────────────────
 
     def _draw_logs(self, stdscr, h, w):
+        """Render the Logs tab: the captured stdout ring buffer.
+
+        Shows the most recent captured lines (newest at the bottom),
+        scrollable via Up/Down (:attr:`_scroll_offset`), with a
+        scroll-percent indicator in the top-right. Lines are lightly
+        colorized by keyword — red for errors, yellow for warnings, green
+        for connect/success. The quit-confirm modal renders before the
+        body so ``q`` works here too.
+
+        Args:
+            stdscr: Target curses window.
+            h: Screen height in rows.
+            w: Screen width in columns.
+        """
         col = 2
         bar_w = min(w - 4, 100)
 
@@ -2715,6 +3021,19 @@ class RelayTUI:
     # ── helpers ──────────────────────────────────────────────────────
 
     def _clip(self, value, width: int) -> str:
+        """Stringify ``value`` and truncate it to fit ``width`` columns.
+
+        When truncation is needed the last visible character is replaced
+        with an ellipsis (``…``) so the cut is obvious. Used to fit table
+        cells without overflowing into the next column.
+
+        Args:
+            value: Any value; coerced to ``str`` first.
+            width: Maximum number of columns. ``<= 0`` returns ``""``.
+
+        Returns:
+            The text unchanged if it fits, else a clipped variant.
+        """
         text = str(value)
         if width <= 0:
             return ""
@@ -2725,10 +3044,31 @@ class RelayTUI:
         return text[: width - 1] + "…"
 
     def _compute_is_connected(self, row: Dict[str, Any]) -> bool:
+        """Return whether a network-compute row counts as connected.
+
+        Treats ``online``/``ready``/``connected`` (case-insensitive) as
+        connected; anything else (offline, error, unknown, …) is not.
+
+        Args:
+            row: A compute dict from ``cerver_network_computes``.
+        """
         status = str(row.get("status") or "").lower()
         return status in ("online", "ready", "connected")
 
     def _format_relative_time(self, value) -> str:
+        """Format a timestamp as a compact "N{s,m,h,d} ago" string.
+
+        Accepts a ``datetime`` or an ISO-8601 string (``Z`` suffix
+        handled); naive datetimes are assumed UTC. Returns ``"—"`` for
+        missing/unparseable input, or the original string if it parses to
+        a non-datetime.
+
+        Args:
+            value: A ``datetime``, ISO string, or falsy/None.
+
+        Returns:
+            A human-readable relative time, e.g. ``"5m ago"``.
+        """
         if not value:
             return "—"
         if isinstance(value, str):
@@ -2750,6 +3090,13 @@ class RelayTUI:
         return f"{total // 86400}d ago"
 
     def _format_uptime(self) -> str:
+        """Format how long the relay has been connected, e.g. ``"1h 12m"``.
+
+        Measures from ``connected_at`` to now. Returns ``"—"`` when not
+        currently connected or the connect time is unknown. Granularity
+        steps up with duration: seconds, then minutes+seconds, then
+        hours+minutes.
+        """
         connected_at = self.state.get("connected_at")
         if not connected_at or self.state["connection"] != "connected":
             return "\u2014"
@@ -2763,6 +3110,15 @@ class RelayTUI:
         return f"{hours}h {minutes}m"
 
     def _format_bytes(self, value) -> str:
+        """Format a byte count into a human-readable size string.
+
+        Scales through B/KB/MB/GB/TB (1024-based), showing whole bytes
+        but one decimal place for larger units. Returns ``"\u2014"`` for
+        ``None``.
+
+        Args:
+            value: Number of bytes, or ``None``.
+        """
         if value is None:
             return "\u2014"
         units = ["B", "KB", "MB", "GB", "TB"]
@@ -2776,6 +3132,14 @@ class RelayTUI:
         return "\u2014"
 
     def _format_load(self, compute: Dict[str, Any]) -> str:
+        """Format the 1/5/15-minute load averages as ``"x.xx  x.xx  x.xx"``.
+
+        Returns ``"—"`` if any of the three averages is missing.
+
+        Args:
+            compute: A compute snapshot whose ``load`` sub-dict carries
+                ``one``/``five``/``fifteen``.
+        """
         load = compute.get("load", {})
         one = load.get("one")
         five = load.get("five")
@@ -2785,6 +3149,14 @@ class RelayTUI:
         return f"{one:.2f}  {five:.2f}  {fifteen:.2f}"
 
     def _format_disk_free(self, disk: Dict[str, Any]) -> str:
+        """Format free disk space, e.g. ``"42.0 GB free"``.
+
+        Returns ``"—"`` when free space is unknown, or a bare size (no
+        "free" suffix) when total capacity is also unknown.
+
+        Args:
+            disk: A disk snapshot with ``free_bytes``/``total_bytes``.
+        """
         free = disk.get("free_bytes")
         total = disk.get("total_bytes")
         if free is None:
@@ -2794,6 +3166,16 @@ class RelayTUI:
         return f"{self._format_bytes(free)} free"
 
     def _record_compute_history(self, compute: Dict[str, Any]) -> None:
+        """Append the latest CPU/memory/load/disk percentages to history.
+
+        Pushes one sample per metric (skipping any that are ``None``)
+        onto the bounded :attr:`_metric_history` deques that back the
+        runtime sparklines. Called from :meth:`update` whenever a fresh
+        compute snapshot arrives.
+
+        Args:
+            compute: The latest compute telemetry snapshot.
+        """
         samples = {
             "cpu": compute.get("cpu_percent"),
             "memory": (compute.get("memory") or {}).get("percent"),
@@ -2805,6 +3187,15 @@ class RelayTUI:
                 self._metric_history[key].append(float(value))
 
     def _sparkline(self, values) -> str:
+        """Render a sequence of 0–100 percentages as a Unicode sparkline.
+
+        Each value maps to one of eight block-height glyphs
+        (``▁``–``█``). Returns ``""`` for an empty sequence.
+
+        Args:
+            values: An iterable of percentages (0–100), e.g. a metric
+                history deque.
+        """
         if not values:
             return ""
         chars = "▁▂▃▄▅▆▇█"
@@ -2815,12 +3206,39 @@ class RelayTUI:
         return "".join(out)
 
     def _usage_bar(self, value: Optional[float], width: int = 10) -> str:
+        """Render a fixed-width ``[####------]`` bar for a 0–100 percentage.
+
+        The fill is clamped to the 0–100 range. ``None`` renders an empty
+        (all-dash) bar.
+
+        Args:
+            value: Percentage to fill, or ``None`` for unknown.
+            width: Total inner width of the bar in characters.
+        """
         if value is None:
             return "[" + ("-" * width) + "]"
         filled = int(round(max(0, min(100, value)) / 100 * width))
         return "[" + ("#" * filled) + ("-" * (width - filled)) + "]"
 
     def _format_metric_line(self, metric: str, value: Optional[float], scale_max: float, invert_label: bool = False, suffix: Optional[str] = None) -> str:
+        """Format a metric as a right-aligned percent label plus a usage bar.
+
+        Produces e.g. ``"  73%  [#######---]"``. The bar fills relative to
+        ``scale_max`` (so a metric capped above 100% still maps onto the
+        full bar), while the text label shows the raw percent \u2014 or, with
+        ``invert_label``, the remaining headroom (``"27% free"``).
+
+        Args:
+            metric: Metric name (currently informational only).
+            value: The percentage value, or ``None`` \u2192 ``"\u2014"``.
+            scale_max: Denominator the bar fill is scaled against.
+            invert_label: Show ``"N% free"`` (100 \u2212 value) instead of used.
+            suffix: Optional trailing text appended after the bar.
+
+        Returns:
+            The formatted single-line string, or ``"\u2014"`` if ``value`` is
+            ``None``.
+        """
         if value is None:
             return "\u2014"
         label = f"{value:.0f}%"
@@ -2834,6 +3252,20 @@ class RelayTUI:
         return "  ".join(parts)
 
     def _get_compute_health(self, compute: Dict[str, Any]) -> str:
+        """Derive a one-word health label from a compute snapshot.
+
+        Applies threshold rules in priority order to classify the
+        machine: ``"Unhealthy"`` (disk ≥ 92% or memory ≥ 90%),
+        ``"Stressed"`` (CPU ≥ 90%, load ≥ 100%, or memory ≥ 80%),
+        ``"Busy"`` (any agents/workflows running), ``"Idle"`` (resources
+        known but quiet), or ``"—"`` when no resource data is available.
+
+        Args:
+            compute: The latest compute telemetry snapshot.
+
+        Returns:
+            One of ``"Unhealthy" | "Stressed" | "Busy" | "Idle" | "—"``.
+        """
         cpu = compute.get("cpu_percent")
         mem = (compute.get("memory") or {}).get("percent")
         disk = (compute.get("disk") or {}).get("percent")
@@ -2860,6 +3292,19 @@ class RelayTUI:
         return "Idle"
 
     def _format_compute_health(self, compute: Dict[str, Any]):
+        """Return the health label paired with its display color attr.
+
+        Uses the cached ``compute_health`` if present (falling back to
+        recomputing via :meth:`_get_compute_health`) and maps it to a
+        curses attribute: red for Unhealthy, yellow for Stressed, cyan
+        for Busy, green for Idle, dim otherwise.
+
+        Args:
+            compute: The latest compute telemetry snapshot.
+
+        Returns:
+            A ``(label, attr)`` tuple for the caller to draw.
+        """
         health = self.state.get("compute_health") or self._get_compute_health(compute)
         if health == "Unhealthy":
             return health, self._red() | self._bold()
