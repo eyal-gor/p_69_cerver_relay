@@ -80,6 +80,17 @@ class ConnectionState(Enum):
 # Falls back to a runtime `git rev-list` when developing from a working tree
 # without going through the build (pip install -e editable, source checkout).
 def _compute_version() -> str:
+    """Resolve the relay version string (the repo's commit count).
+
+    Prefers the baked-in ``COMMIT_COUNT`` written into ``_version.py`` at
+    wheel build time. When running from a working tree that skipped the
+    build (editable install, source checkout), falls back to a runtime
+    ``git rev-list --count HEAD``.
+
+    Returns:
+        The commit count as a string, or ``"0"`` if neither source is
+        available.
+    """
     try:
         from . import _version  # type: ignore
         count = getattr(_version, "COMMIT_COUNT", "")
@@ -270,6 +281,29 @@ class RelayClient:
         cerver_owner_id: Optional[str] = None,
         cerver_api_token: Optional[str] = None,
     ):
+        """Initialize the relay client and seed its registration identity.
+
+        Resolves the machine name and stable machine id, then seeds the
+        shared relay-status record with that id immediately (before the
+        WebSocket comes up) so cerver-only relays register under a
+        matchable ``relay_machine_id`` rather than ``None``. Cerver
+        gateway credentials are resolved from the explicit arguments,
+        then environment variables, then the on-disk token cache.
+
+        Args:
+            cloud_url: Kompany Cloud base URL; a trailing slash is stripped.
+            local_port: Port the local agent server listens on.
+            machine_name: Human-readable label for this machine. Defaults
+                to the saved nickname or the system hostname.
+            tui: Optional RelayTUI instance to mirror connection state into.
+            cerver_url: Cerver gateway base URL. Falls back to
+                ``CERVER_GATEWAY_URL``.
+            cerver_owner_id: Cerver account owner id. Falls back to
+                ``CERVER_OWNER_ID``, then the authenticated user id.
+            cerver_api_token: Cerver API token. Falls back to
+                ``CERVER_API_TOKEN``/``CERVER_API_KEY``, the cached token,
+                then the Kompany access token.
+        """
         self.cloud_url = cloud_url.rstrip("/")
         self.local_port = local_port
         self.machine_name = machine_name or self._get_machine_name()
@@ -1315,6 +1349,14 @@ class RelayClient:
             print(f"[Relay] Failed to load CERVER_API_TOKEN from Infisical: {e}")
 
     def _ensure_cerver_client(self) -> Optional[CerverComputeClient]:
+        """Return a cached CerverComputeClient, rebuilding it if config changed.
+
+        Reuses the existing client when the resolved owner id, API token,
+        and gateway URL all still match; otherwise constructs a fresh one.
+
+        Returns:
+            The compute client, or ``None`` if no Cerver gateway URL is set.
+        """
         if not self.cerver_url:
             return None
 
@@ -1339,6 +1381,19 @@ class RelayClient:
         return self._cerver_client
 
     def _ensure_cerver_connect_transport(self) -> Optional[CerverConnectTransport]:
+        """Return a cached CerverConnectTransport, rebuilding it if config changed.
+
+        The transport carries the persistent WebSocket "connect channel"
+        used to relay sessions. Requires a compute client that is already
+        registered (has an API token and a ``compute_id``). Reuses the
+        existing transport when its URL, token, compute id, and local port
+        all still match; otherwise constructs a fresh one wired to the
+        status/connected callbacks.
+
+        Returns:
+            The connect transport, or ``None`` if no registered compute
+            client is available yet.
+        """
         client = self._ensure_cerver_client()
         if not client or not client.api_token or not client.compute_id:
             return None
@@ -1363,6 +1418,16 @@ class RelayClient:
         return self._cerver_connect_transport
 
     def _handle_cerver_connect_status(self, status: str):
+        """Mirror the connect transport's status into the TUI.
+
+        Invoked by the transport on each state transition; maps the
+        ``"connected"`` and ``"connecting"`` states onto ``cerver_status``
+        so the dashboard reflects the live WebSocket state. Other statuses
+        are ignored here (handled elsewhere).
+
+        Args:
+            status: The transport's reported state string.
+        """
         if status == "connected":
             self._tui_update(cerver_status="connected")
             return
@@ -1371,6 +1436,16 @@ class RelayClient:
             self._tui_update(cerver_status="connecting")
 
     def _handle_cerver_connect_connected(self, payload: Dict[str, Any]):
+        """Handle the connect channel reaching the live/connected state.
+
+        Fires once the WebSocket handshake completes. Updates the TUI with
+        the confirmed compute id (from the payload, falling back to the
+        client's) and a fresh heartbeat timestamp.
+
+        Args:
+            payload: Connection payload from the transport; may carry a
+                ``compute_id``.
+        """
         client = self._ensure_cerver_client()
         print("[Cerver] Connect channel live")
         self._tui_update(
@@ -1380,6 +1455,14 @@ class RelayClient:
         )
 
     async def _start_cerver_connect_transport(self):
+        """Start the connect-channel WebSocket transport if not already running.
+
+        Idempotent: returns early when no transport can be built yet or a
+        live transport task already exists. Registers the transport as the
+        process-wide active transport (so the agent manager can publish
+        stream events without holding a direct reference) and launches its
+        ``run()`` loop as a tracked task.
+        """
         transport = self._ensure_cerver_connect_transport()
         if not transport:
             return
@@ -1394,6 +1477,13 @@ class RelayClient:
         self._cerver_connect_task = asyncio.create_task(transport.run())
 
     async def _stop_cerver_connect_transport(self):
+        """Tear down the connect-channel transport and clear the active reference.
+
+        Cancels the running transport task, closes the transport, and
+        unregisters it as the process-wide active transport. Best-effort:
+        cancellation and close errors are swallowed so shutdown always
+        completes.
+        """
         if self._cerver_connect_task and not self._cerver_connect_task.done():
             self._cerver_connect_task.cancel()
             try:
@@ -1411,6 +1501,13 @@ class RelayClient:
         set_active_transport(None)
 
     async def _register_cerver_compute(self):
+        """Register this machine as a compute with the Cerver gateway.
+
+        Performs the HTTP registration and, on success, records the
+        returned ``compute_id`` and brings up the connect-channel WebSocket
+        transport. Registration failures are caught and surfaced to the
+        TUI as an error status rather than raised.
+        """
         client = self._ensure_cerver_client()
         if not client:
             return
@@ -1435,6 +1532,20 @@ class RelayClient:
             )
 
     async def _cerver_heartbeat_loop(self):
+        """Send periodic HTTP heartbeats and re-spin the WS transport as needed.
+
+        Runs every 60s while the client is active. The heartbeat keeps the
+        gateway's registration record fresh and refreshes the TUI's compute
+        id and heartbeat timestamp. It deliberately does **not** set
+        ``cerver_status="connected"`` — that is the WS transport's job — so
+        a half-open WebSocket can't show green while sessions fail.
+
+        If the transport task has ended it is restarted; if the task is
+        alive but the channel reports not-connected (likely stuck in
+        backoff) the asymmetry is logged and the transport is left to retry
+        on its own. Heartbeat failures are surfaced as a non-fatal
+        ``cerver_http_error`` without clobbering the channel state.
+        """
         # HTTP heartbeat keeps the gateway's registration record fresh
         # and lets us re-spin the WS transport if it's missing. It does
         # NOT set cerver_status="connected" anymore: that's the WS
@@ -1656,6 +1767,11 @@ class RelayClient:
             os._exit(0)
 
     async def _unregister_cerver_compute(self):
+        """Unregister this machine's compute from the Cerver gateway.
+
+        No-op when no compute client is available. Called during shutdown
+        so the machine stops appearing as an available compute.
+        """
         client = self._ensure_cerver_client()
         if not client:
             return
@@ -2157,6 +2273,7 @@ def run_relay_client(
     )
 
     async def main():
+        """Connect the relay client to Kompany Cloud and run until stopped."""
         await client.connect()
 
     try:
@@ -2214,6 +2331,7 @@ def run_cerver_compute_client(
     )
 
     async def main():
+        """Register with Cerver only (no Kompany Cloud) and run until stopped."""
         await client.connect_cerver_only()
 
     try:
@@ -2324,6 +2442,7 @@ def start_server_in_background(port: int = 18081, home_dir: Optional[str] = None
             return None
 
     def run():
+        """Thread body: configure directories and run the blocking local server."""
         from .bridge_and_local_actions import run_server, set_default_working_dir, set_home_directory
         if home_dir:
             set_home_directory(home_dir)
@@ -2462,6 +2581,12 @@ def _run_with_tui(args, home_dir, current_project, onboarding_needed=False):
 
     # Callback when user sets home dir during onboarding or [H] edit
     def on_home_set(path):
+        """TUI callback: persist the chosen home directory and apply it live.
+
+        Args:
+            path: The home directory selected during onboarding or via the
+                ``[H]`` edit action.
+        """
         save_persistent_config({"home_dir": path})
         try:
             from .bridge_and_local_actions import set_home_directory
@@ -2473,6 +2598,14 @@ def _run_with_tui(args, home_dir, current_project, onboarding_needed=False):
 
     # Callback when user renames the machine
     def on_name_set(name):
+        """TUI callback: rename the machine on the live client and persist it.
+
+        Updates the running relay client and its Cerver registration label,
+        then saves the name so it survives restarts.
+
+        Args:
+            name: The new machine name entered by the user.
+        """
         relay_ref[0].machine_name = name
         # Update Cerver registration label
         if relay_ref[0]._cerver_client:
@@ -2485,6 +2618,16 @@ def _run_with_tui(args, home_dir, current_project, onboarding_needed=False):
 
     # Callback when user toggles launchd service (install/uninstall)
     def on_launchd_toggle(do_install):
+        """TUI callback: install or uninstall the launchd auto-start service.
+
+        On install, registers the launchd service (using the configured
+        home dir) and reflects the resulting run state in the TUI; on
+        uninstall, unloads and removes the plist. After toggling, prompts
+        for CLI selection when that first-run step is still pending.
+
+        Args:
+            do_install: ``True`` to install the service, ``False`` to remove it.
+        """
         import subprocess
         if do_install:
             home = tui.state.get("home_dir")
@@ -2514,6 +2657,7 @@ def _run_with_tui(args, home_dir, current_project, onboarding_needed=False):
 
     # Callback when user logs out
     def on_logout():
+        """TUI callback: log out by deleting the cached auth token file."""
         if TOKEN_FILE.exists():
             TOKEN_FILE.unlink()
         print("[Relay] Logged out. Token cleared.")
@@ -2522,6 +2666,11 @@ def _run_with_tui(args, home_dir, current_project, onboarding_needed=False):
 
     # Callback when user selects a CLI provider
     def on_cli_set(cli_name):
+        """TUI callback: set the default CLI provider for spawned agents.
+
+        Args:
+            cli_name: Provider key (e.g. ``"claude"``, ``"codex"``, ``"grok"``).
+        """
         try:
             from .bridge_and_local_actions.cli_providers import set_default_cli
             set_default_cli(cli_name)
@@ -2533,6 +2682,12 @@ def _run_with_tui(args, home_dir, current_project, onboarding_needed=False):
 
     # Callback when user sets an API key for a provider
     def on_cli_api_key(provider_name, api_key):
+        """TUI callback: store an API key for a CLI provider and refresh status.
+
+        Args:
+            provider_name: Provider key the key belongs to.
+            api_key: The API key to persist for that provider.
+        """
         try:
             from .bridge_and_local_actions.cli_providers import get_provider, get_available_providers
             provider = get_provider(provider_name)
@@ -2548,9 +2703,22 @@ def _run_with_tui(args, home_dir, current_project, onboarding_needed=False):
     # Callback when user starts device auth for a provider
     # Runs in a background thread to avoid freezing the TUI
     def on_cli_device_auth(provider_name):
+        """TUI callback: kick off browser/device sign-in for a CLI provider.
+
+        Shows a "connecting..." state immediately and runs the actual auth
+        flow on a background thread so the TUI never freezes. The result
+        (or failure) is written back onto the TUI for the device-auth view.
+
+        Args:
+            provider_name: Provider key to authenticate.
+
+        Returns:
+            ``True`` to signal the TUI to switch to the device-auth view.
+        """
         import threading
 
         def _run():
+            """Background thread: run the provider's device-auth flow."""
             try:
                 from .bridge_and_local_actions.cli_providers import get_provider, get_available_providers
                 provider = get_provider(provider_name)
@@ -2576,9 +2744,18 @@ def _run_with_tui(args, home_dir, current_project, onboarding_needed=False):
 
     # Callback to install a CLI provider (runs in background thread)
     def on_cli_install(provider_name):
+        """TUI callback: install a CLI provider on a background thread.
+
+        Marks the provider as installing, runs the install, prints the
+        outcome, and refreshes provider status in the TUI when done.
+
+        Args:
+            provider_name: Provider key to install.
+        """
         import threading
 
         def _run():
+            """Background thread: install the provider and refresh TUI status."""
             try:
                 from .bridge_and_local_actions.cli_providers import get_provider, get_available_providers
                 provider = get_provider(provider_name)
@@ -2602,6 +2779,7 @@ def _run_with_tui(args, home_dir, current_project, onboarding_needed=False):
 
     # Callback to refresh CLI provider status (after auth changes)
     def on_cli_refresh():
+        """TUI callback: re-probe CLI providers and push fresh status to the TUI."""
         try:
             from .bridge_and_local_actions.cli_providers import get_available_providers
             tui.update(cli_providers=get_available_providers())
@@ -2686,6 +2864,12 @@ def _run_with_tui(args, home_dir, current_project, onboarding_needed=False):
     relay_ref = [None]
 
     def run_relay():
+        """Thread body: build the RelayClient and run its event loop.
+
+        Stores the client in ``relay_ref`` so TUI callbacks can reach it,
+        then runs either the cerver-only or full Kompany Cloud connect flow
+        depending on the parsed args.
+        """
         client = RelayClient(
             cloud_url=args.cloud_url,
             local_port=args.port,
