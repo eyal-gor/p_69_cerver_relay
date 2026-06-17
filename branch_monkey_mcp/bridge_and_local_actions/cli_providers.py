@@ -130,6 +130,12 @@ class CliCommand:
     )
 
     def __post_init__(self):
+        """Normalize ``env_inject`` to an empty dict when omitted.
+
+        A mutable ``{}`` default can't be set on the field directly, so the
+        field defaults to ``None`` and is coerced here. This lets callers
+        unconditionally merge ``env_inject`` without a None guard.
+        """
         if self.env_inject is None:
             self.env_inject = {}
 
@@ -413,6 +419,10 @@ class ClaudeCodeProvider(CliProvider):
     api_key_config = "anthropic_api_key"
 
     def is_available(self) -> Optional[str]:
+        """Return the resolved path to the ``claude`` binary, or None.
+
+        See :meth:`CliProvider.is_available`.
+        """
         return _resolve_cli("claude")
 
     def get_auth_status(self) -> dict:
@@ -494,6 +504,16 @@ class ClaudeCodeProvider(CliProvider):
         return self.get_auth_env()
 
     def build_text_command(self, prompt, system_prompt=None, use_mcp=False):
+        """Build a one-shot ``claude -p`` command with plain-text output.
+
+        Overrides :meth:`CliProvider.build_text_command`. Uses
+        ``--output-format text`` and skips permission prompts. When
+        ``use_mcp`` is set, the first ``.mcp.json`` found among the cwd,
+        home, and the branch_monkey project dir is wired in via
+        ``--mcp-config``. ``system_prompt``, if given, is appended with
+        ``--append-system-prompt``. Auth env is resolved through
+        :meth:`_build_env_overrides` / :meth:`_build_env_inject`.
+        """
         args = [
             "claude",
             "-p", prompt,
@@ -519,6 +539,13 @@ class ClaudeCodeProvider(CliProvider):
         )
 
     def build_run_command(self, prompt, system_prompt=None, model=None):
+        """Build a streaming ``claude -p`` command (``stream-json`` output).
+
+        Overrides :meth:`CliProvider.build_run_command`. Emits verbose
+        stream-json so the relay parser sees per-turn events. ``model``,
+        when set, overrides the CLI default via ``--model``; ``system_prompt``
+        is appended via ``--append-system-prompt``.
+        """
         args = [
             "claude",
             "-p", prompt,
@@ -538,6 +565,12 @@ class ClaudeCodeProvider(CliProvider):
         )
 
     def build_resume_command(self, prompt, session_id):
+        """Build a ``claude --resume`` command continuing ``session_id``.
+
+        Overrides :meth:`CliProvider.build_resume_command`. Resumes the
+        native Claude Code session (the id captured by
+        :meth:`extract_session_id`) and streams stream-json output.
+        """
         return CliCommand(
             args=[
                 "claude",
@@ -552,6 +585,12 @@ class ClaudeCodeProvider(CliProvider):
         )
 
     def build_oneshot_command(self, prompt):
+        """Build a single-shot ``claude -p`` command with ``json`` output.
+
+        Overrides :meth:`CliProvider.build_oneshot_command`. Unlike
+        :meth:`build_run_command`, this requests a single buffered JSON
+        result rather than a stream.
+        """
         return CliCommand(
             args=[
                 "claude",
@@ -564,11 +603,22 @@ class ClaudeCodeProvider(CliProvider):
         )
 
     def extract_session_id(self, event):
+        """Return the session id from Claude's ``system/init`` event.
+
+        Overrides :meth:`CliProvider.extract_session_id`. The id is the
+        native Claude Code session used by :meth:`build_resume_command`.
+        """
         if event.get("type") == "system" and event.get("subtype") == "init":
             return event.get("session_id")
         return None
 
     def is_noise(self, text):
+        """Return True for Claude Code stderr lines safe to drop.
+
+        Overrides :meth:`CliProvider.is_noise`. Filters npm/deprecation
+        warnings and bun baseline-build chatter that would otherwise
+        pollute the transcript.
+        """
         noise_prefixes = ("warn:", "Warning:", "DeprecationWarning", "[DEP")
         noise_substrings = ("oven-sh/bun", "baseline.zip", "baseline build")
         return text.startswith(noise_prefixes) or any(s in text for s in noise_substrings)
@@ -590,6 +640,10 @@ class CodexProvider(CliProvider):
     _subscription_cache: Optional[bool] = None
 
     def is_available(self) -> Optional[str]:
+        """Return the resolved path to the ``codex`` binary, or None.
+
+        See :meth:`CliProvider.is_available`.
+        """
         return _resolve_cli("codex")
 
     def _has_subscription(self) -> bool:
@@ -799,6 +853,18 @@ class CodexProvider(CliProvider):
         return f.name
 
     def build_text_command(self, prompt, system_prompt=None, use_mcp=False):
+        """Build a one-shot ``codex exec`` command returning plain text.
+
+        Overrides :meth:`CliProvider.build_text_command`. Codex has no
+        ``--system-prompt`` flag, so the prompt (merged with
+        ``system_prompt`` by :meth:`_write_prompt_file`) is piped in via a
+        temp file, and the answer is read back from a ``-o`` output file.
+        The bash wrapper discards codex's verbose stdout but preserves its
+        real exit code through ``${PIPESTATUS[1]}`` so an auth/model
+        failure isn't masked by the trailing ``rm``. ``use_mcp`` is
+        accepted for interface parity but unused. Auth mode is finalized by
+        :meth:`_finalize_codex_env`.
+        """
         prompt_file = self._write_prompt_file(prompt, system_prompt)
         import tempfile
         out_file = tempfile.mktemp(suffix='.txt', prefix='codex-out-')
@@ -822,6 +888,16 @@ class CodexProvider(CliProvider):
         )
 
     def build_run_command(self, prompt, system_prompt=None, model=None):
+        """Build a streaming ``codex exec --json`` command.
+
+        Overrides :meth:`CliProvider.build_run_command`. The prompt (plus
+        ``system_prompt``) is piped from a temp file; ``--json`` produces
+        the codex event stream that :meth:`normalize_event` translates to
+        Claude's stream-json vocabulary. ``model``, when set, is applied
+        for this call only via ``-c model="<name>"`` (a one-shot override
+        of ``~/.codex/config.toml``). The exit code survives the trailing
+        ``rm`` via ``${PIPESTATUS[1]}``.
+        """
         prompt_file = self._write_prompt_file(prompt, system_prompt)
         # codex supports -c key=value overrides on its global config —
         # putting `-c model="<name>"` ahead of `exec` is the same as
@@ -840,6 +916,12 @@ class CodexProvider(CliProvider):
         )
 
     def build_resume_command(self, prompt, session_id):
+        """Build a ``codex exec resume <session_id>`` command.
+
+        Overrides :meth:`CliProvider.build_resume_command`. Continues the
+        codex thread whose id was captured by :meth:`extract_session_id`,
+        streaming ``--json`` events.
+        """
         # Codex syntax: codex exec resume <session_id> <prompt> --dangerously-bypass-approvals-and-sandbox --json
         return CliCommand(
             args=[
@@ -854,6 +936,12 @@ class CodexProvider(CliProvider):
         )
 
     def build_oneshot_command(self, prompt):
+        """Build a single ``codex exec`` command with ``--json`` output.
+
+        Overrides :meth:`CliProvider.build_oneshot_command`. Passes the
+        prompt directly as an argument (no temp file or system prompt)
+        for a fresh, non-resumed run.
+        """
         return CliCommand(
             args=[
                 "codex",
@@ -1002,6 +1090,13 @@ class CodexProvider(CliProvider):
         return raw_json
 
     def extract_session_id(self, event):
+        """Return the codex thread id from a raw or normalized init event.
+
+        Overrides :meth:`CliProvider.extract_session_id`. Handles both
+        codex's native ``thread.started`` (``thread_id``) and the
+        post-:meth:`normalize_event` ``system/init`` (``session_id``) shape,
+        since extraction may run either side of normalization.
+        """
         # Check Codex thread.started format
         if event.get("type") == "thread.started":
             return event.get("thread_id")
@@ -1011,6 +1106,12 @@ class CodexProvider(CliProvider):
         return None
 
     def is_noise(self, text):
+        """Return True for codex stderr lines safe to drop.
+
+        Overrides :meth:`CliProvider.is_noise`. Filters npm/deprecation
+        warnings and codex_core skill-loading errors that are non-fatal
+        noise rather than agent output.
+        """
         noise_prefixes = ("warn:", "Warning:", "DeprecationWarning", "[DEP", "npm warn")
         noise_substrings = ("ERROR codex_core::skills", "ERROR codex_core::codex", "failed to load skill", "failed to stat skills")
         return text.startswith(noise_prefixes) or any(s in text for s in noise_substrings)
@@ -1028,6 +1129,12 @@ class GrokProvider(CliProvider):
     api_key_config = "xai_api_key"
 
     def is_available(self) -> Optional[str]:
+        """Return the resolved path to the ``grok`` binary, or None.
+
+        See :meth:`CliProvider.is_available`. Note that the actual run
+        path bypasses this binary (see :meth:`_grok_cli_command`); this
+        probe still gates availability/installation reporting.
+        """
         return _resolve_cli("grok")
 
     def get_auth_status(self) -> dict:
@@ -1052,6 +1159,14 @@ class GrokProvider(CliProvider):
         return {"authenticated": False, "method": "none", "detail": "No API key — get one at console.x.ai"}
 
     def build_run_command(self, prompt, system_prompt=None, model=None):
+        """Build a streaming Grok run via the bundled ``xai_runner``.
+
+        Overrides :meth:`CliProvider.build_run_command`. Resolves the xAI
+        key (stored/vault/env) and delegates to :meth:`_grok_cli_command`
+        with ``stream-json`` output. ``model``, when set, selects the xAI
+        model. The ``grok`` CLI itself is not invoked — see
+        :meth:`_grok_cli_command` for why the runner hits xAI directly.
+        """
         # grok-cli runs claude code under a proxy, so output is claude stream-json format.
         # We pass the API key via -k flag if stored, otherwise grok uses its keychain.
         args = ["grok"]
@@ -1073,11 +1188,44 @@ class GrokProvider(CliProvider):
         return self._grok_cli_command(prompt, "stream-json", auth_env, api_key, model=model)
 
     def build_text_command(self, prompt, system_prompt=None, use_mcp=False):
+        """Build a one-shot plain-text Grok run via ``xai_runner``.
+
+        Overrides :meth:`CliProvider.build_text_command`. Delegates to
+        :meth:`_grok_cli_command` with ``text`` output, forwarding
+        ``system_prompt``. ``use_mcp`` is accepted for interface parity
+        but unused.
+        """
         auth_env = self.get_auth_env()
         api_key = auth_env.get(self.api_key_env)
         return self._grok_cli_command(prompt, "text", auth_env, api_key, system_prompt)
 
     def _grok_cli_command(self, prompt, output_format, auth_env, api_key, system_prompt=None, model=None):
+        """Build the shared ``xai_runner`` invocation for every Grok mode.
+
+        Central command builder used by run/text/resume/oneshot. It spawns
+        ``python -m ...xai_runner`` rather than the ``claude`` binary so
+        Grok talks to xAI directly: routing through ``claude -p`` made Grok
+        inherit Anthropic's subscription rate limit, 400-ing before the xAI
+        call even fired. The runner emits the same stream-json the relay
+        parser already consumes.
+
+        ANTHROPIC_API_KEY is stripped from the inherited env (so a stray
+        Anthropic key can't leak into the runner's auth path) and the xAI
+        key is re-injected as ANTHROPIC_API_KEY alongside
+        ``ANTHROPIC_BASE_URL=https://api.x.ai``, which is how the runner is
+        pointed at xAI.
+
+        Args:
+            prompt: User prompt to send.
+            output_format: Runner ``--output-format`` (``text``,
+                ``stream-json``, or ``json``). ``stream-json`` also adds
+                ``--verbose``.
+            auth_env: Resolved auth env mapping from :meth:`get_auth_env`.
+            api_key: The xAI key, or None to let the runner resolve its own.
+            system_prompt: Optional system prompt, appended via
+                ``--append-system-prompt``.
+            model: Optional xAI model passed via ``--model``.
+        """
         # Direct path to xAI — bypass the `claude` binary entirely. Routing
         # grok through `claude -p` made grok inherit claude's own
         # subscription rate limit: when the Anthropic Max quota was
@@ -1112,6 +1260,14 @@ class GrokProvider(CliProvider):
         )
 
     def build_resume_command(self, prompt, session_id):
+        """Build a Grok "resume" — behaves like a fresh run.
+
+        Overrides :meth:`CliProvider.build_resume_command`. ``xai_runner``
+        (and xAI itself) is stateless w.r.t. ``session_id``: conversational
+        continuity is a cerver-level concern (the relay re-feeds the prior
+        transcript each turn), so the id is ignored and the model only sees
+        the current prompt. Mirrors the pre-existing claude-binary behavior.
+        """
         # xai_runner is stateless w.r.t. session_id — chat-style resume is a
         # cerver-level concern (the relay re-feeds prior transcript on each
         # turn). Behave the same as a fresh run for now; the model only sees
@@ -1123,17 +1279,33 @@ class GrokProvider(CliProvider):
         return self._grok_cli_command(prompt, "stream-json", auth_env, api_key)
 
     def build_oneshot_command(self, prompt):
+        """Build a single buffered (``json``) Grok run via ``xai_runner``.
+
+        Overrides :meth:`CliProvider.build_oneshot_command`. Delegates to
+        :meth:`_grok_cli_command` with ``json`` output.
+        """
         auth_env = self.get_auth_env()
         api_key = auth_env.get(self.api_key_env)
         return self._grok_cli_command(prompt, "json", auth_env, api_key)
 
     def extract_session_id(self, event):
+        """Return the session id from a ``system/init`` event.
+
+        Overrides :meth:`CliProvider.extract_session_id`. Grok's output
+        follows Claude's stream-json shape (the runner emits it), so the
+        init event carries ``session_id`` just like Claude.
+        """
         # Same as Claude — grok uses claude under the hood
         if event.get("type") == "system" and event.get("subtype") == "init":
             return event.get("session_id")
         return None
 
     def is_noise(self, text):
+        """Return True for Grok stderr lines safe to drop.
+
+        Overrides :meth:`CliProvider.is_noise`. Same filters as Claude
+        plus ``proxy`` chatter from grok-cli's local proxy layer.
+        """
         noise_prefixes = ("warn:", "Warning:", "DeprecationWarning", "[DEP")
         noise_substrings = ("oven-sh/bun", "baseline.zip", "baseline build", "proxy")
         return text.startswith(noise_prefixes) or any(s in text for s in noise_substrings)
@@ -1159,9 +1331,22 @@ class GemmaProvider(CliProvider):
     # as Python is. Return the interpreter path so get_provider() treats us
     # as installed and never falls back to claude.
     def is_available(self) -> Optional[str]:
+        """Always report installed by returning the Python interpreter path.
+
+        Overrides :meth:`CliProvider.is_available`. The Gemma runner ships
+        inside this package, so there is no vendor binary to find — the
+        provider is reachable as long as Python is. Returning a non-None
+        path keeps :func:`get_provider` from falling back to claude.
+        """
         return sys.executable
 
     def health_check(self) -> dict:
+        """Report healthy iff a Gemini API key can be resolved.
+
+        Overrides :meth:`CliProvider.health_check`. With no binary to
+        probe, health is purely an auth question, delegated to
+        :meth:`get_auth_status`.
+        """
         # No binary to probe — report healthy if we can resolve a key.
         auth = self.get_auth_status()
         return {
@@ -1186,6 +1371,25 @@ class GemmaProvider(CliProvider):
         return {"authenticated": False, "method": "none", "detail": "No API key — get one free at aistudio.google.com/apikey"}
 
     def _gemma_command(self, prompt, output_format, model=None, system_prompt=None):
+        """Build the shared ``gemma_runner`` invocation for every Gemma mode.
+
+        Central command builder used by run/text/resume/oneshot. Like
+        :class:`GrokProvider`, there is no vendor CLI: it spawns
+        ``python -m ...gemma_runner``, which hits Google's
+        OpenAI-compatible Gemini endpoint and emits claude stream-json.
+        ``CLAUDECODE`` is dropped so nested launches behave, and the
+        resolved Gemini key is injected so the runner sees it regardless
+        of how the relay env was assembled.
+
+        Args:
+            prompt: User prompt to send.
+            output_format: Runner ``--output-format`` (``text``,
+                ``stream-json``, or ``json``). ``stream-json`` also adds
+                ``--verbose``.
+            model: Optional Gemini model passed via ``--model``.
+            system_prompt: Optional system prompt, appended via
+                ``--append-system-prompt``.
+        """
         auth_env = self.get_auth_env()
         args = [
             sys.executable, "-m",
@@ -1208,26 +1412,60 @@ class GemmaProvider(CliProvider):
         )
 
     def build_run_command(self, prompt, system_prompt=None, model=None):
+        """Build a streaming Gemma run via ``gemma_runner``.
+
+        Overrides :meth:`CliProvider.build_run_command`. Delegates to
+        :meth:`_gemma_command` with ``stream-json`` output, forwarding
+        ``model`` and ``system_prompt``.
+        """
         return self._gemma_command(prompt, "stream-json", model=model, system_prompt=system_prompt)
 
     def build_text_command(self, prompt, system_prompt=None, use_mcp=False):
+        """Build a one-shot plain-text Gemma run via ``gemma_runner``.
+
+        Overrides :meth:`CliProvider.build_text_command`. Delegates to
+        :meth:`_gemma_command` with ``text`` output. ``use_mcp`` is
+        accepted for interface parity but unused.
+        """
         return self._gemma_command(prompt, "text", system_prompt=system_prompt)
 
     def build_resume_command(self, prompt, session_id):
+        """Build a Gemma "resume" — behaves like a fresh run.
+
+        Overrides :meth:`CliProvider.build_resume_command`. Gemini is
+        stateless w.r.t. ``session_id``; the relay re-feeds the prior
+        transcript each turn, so resume mirrors a fresh run (see
+        :meth:`GrokProvider.build_resume_command`).
+        """
         # Gemini is stateless w.r.t. session_id — chat-style resume is a
         # cerver-level concern (the relay re-feeds the prior transcript each
         # turn), so a resume behaves like a fresh run. Mirrors GrokProvider.
         return self._gemma_command(prompt, "stream-json")
 
     def build_oneshot_command(self, prompt):
+        """Build a single buffered (``json``) Gemma run via ``gemma_runner``.
+
+        Overrides :meth:`CliProvider.build_oneshot_command`. Delegates to
+        :meth:`_gemma_command` with ``json`` output.
+        """
         return self._gemma_command(prompt, "json")
 
     def extract_session_id(self, event):
+        """Return the session id from a ``system/init`` event.
+
+        Overrides :meth:`CliProvider.extract_session_id`. The runner emits
+        Claude's stream-json shape, so the init event carries ``session_id``.
+        """
         if event.get("type") == "system" and event.get("subtype") == "init":
             return event.get("session_id")
         return None
 
     def is_noise(self, text):
+        """Return True for Gemma stderr lines safe to drop.
+
+        Overrides :meth:`CliProvider.is_noise`. Filters generic
+        warning/deprecation prefixes from the bundled runner.
+        """
         return text.startswith(("warn:", "Warning:", "DeprecationWarning"))
 
 
