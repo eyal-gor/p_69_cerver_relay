@@ -16,6 +16,20 @@ from .provider import build_provider_state
 
 
 def _extract_normalized_text(normalized: Any) -> str:
+    """Pull the human-readable text out of a normalized CLI stream event.
+
+    Handles the event shapes the local providers emit: ``assistant`` messages
+    (concatenating their ``text`` content blocks), ``tool_result`` and
+    ``result`` events (their respective payload fields), and a generic
+    fallback to a top-level ``text`` field.
+
+    Args:
+        normalized: A parsed stream event. Anything that is not a dict (or that
+            lacks a recognized shape) yields an empty string.
+
+    Returns:
+        The extracted text, or an empty string when nothing matches.
+    """
     if not isinstance(normalized, dict):
         return ""
 
@@ -39,6 +53,20 @@ def _extract_normalized_text(normalized: Any) -> str:
 
 
 def extract_stream_text(event: Dict[str, Any]) -> str:
+    """Extract displayable text from a raw agent-manager stream event.
+
+    Only ``output`` events carry text; everything else yields an empty string.
+    The event's ``data`` field is expected to be a JSON-encoded normalized
+    event, which is parsed and routed through :func:`_extract_normalized_text`.
+    If parsing fails, the event's ``raw`` field (or the raw ``data`` string) is
+    returned unchanged.
+
+    Args:
+        event: A stream event from the agent manager's listener queue.
+
+    Returns:
+        The displayable text for the event, or an empty string.
+    """
     if event.get("type") != "output":
         return ""
 
@@ -54,6 +82,28 @@ def extract_stream_text(event: Dict[str, Any]) -> str:
 
 
 async def send_provider_input(agent_manager: Any, agent_id: str, message: str) -> Dict[str, Any]:
+    """Route an input message to an agent based on its current lifecycle state.
+
+    Dispatches by the agent's status:
+
+    - ``prepared``: spawns the CLI process with ``message`` as the first prompt
+      (``action="started"``).
+    - ``paused``/``completed``/``failed`` with a saved ``session_id``: resumes
+      the existing session (``action="resumed"``).
+    - ``running``: rejected, since the agent is busy with a prior message.
+
+    Args:
+        agent_manager: The legacy agent manager owning the agent's lifecycle.
+        agent_id: Identifier of the target agent.
+        message: The user input/prompt to deliver.
+
+    Returns:
+        A result dict describing the action taken (``started`` or ``resumed``).
+
+    Raises:
+        HTTPException: 404 if the agent does not exist; 400 if the agent is
+            running or has no resumable session.
+    """
     agent = agent_manager.get(agent_id)
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
@@ -91,6 +141,29 @@ async def collect_provider_run(
     message: str,
     timeout_seconds: int,
 ) -> Dict[str, Any]:
+    """Run a single provider turn to completion and return an aggregated result.
+
+    Registers a listener, sends ``message`` via :func:`send_provider_input`,
+    then drains the event queue until the run ends (``exit``/``paused``) or an
+    ``error`` event arrives, accumulating stdout text and stderr. Each ``await``
+    on the queue is bounded by ``timeout_seconds``. The final stdout prefers the
+    result extracted from the agent's output buffer, falling back to the
+    concatenated stream text. The listener is always removed on exit.
+
+    Args:
+        agent_manager: The legacy agent manager owning the agent's lifecycle.
+        agent_id: Identifier of the target agent.
+        message: The user input/prompt to deliver.
+        timeout_seconds: Maximum time to wait for each successive event.
+
+    Returns:
+        A shell-style result dict (``stdout``, ``stderr``, ``exit_code``,
+        ``command_id``, ``session_id``, resumability, etc.).
+
+    Raises:
+        HTTPException: 408 if no event arrives within ``timeout_seconds``, plus
+            any error propagated from :func:`send_provider_input`.
+    """
     queue = agent_manager.add_listener(agent_id)
 
     try:
@@ -160,6 +233,27 @@ async def provider_stream_events(
     agent_id: str,
     message: str,
 ) -> AsyncGenerator[str, None]:
+    """Stream a provider turn to the client as Server-Sent Events.
+
+    Emits an initial ``connected`` event, sends ``message`` via
+    :func:`send_provider_input`, then relays each agent-manager event as an
+    ``data:`` SSE frame until the run finishes (``exit``/``paused``) or the
+    client disconnects. A ``: heartbeat`` comment is sent whenever 15 seconds
+    pass with no event, keeping the connection alive. The listener is always
+    removed on exit.
+
+    Args:
+        agent_manager: The legacy agent manager owning the agent's lifecycle.
+        request: The incoming request, polled to detect client disconnects.
+        agent_id: Identifier of the target agent.
+        message: The user input/prompt to deliver.
+
+    Yields:
+        SSE-formatted strings (``data:`` frames and heartbeat comments).
+
+    Raises:
+        HTTPException: 404 if the agent does not exist.
+    """
     queue = agent_manager.add_listener(agent_id)
 
     try:
@@ -192,6 +286,23 @@ def get_provider_state_response(
     sandbox_id: str,
     workflow_summary: Dict[str, Any],
 ) -> Dict[str, Any]:
+    """Build the provider state response for a sandbox (agent).
+
+    Looks up the agent by ``sandbox_id`` and delegates to
+    :func:`~.provider.build_provider_state`, passing along the total agent
+    count and the supplied workflow summary.
+
+    Args:
+        agent_manager: The legacy agent manager owning the agent's lifecycle.
+        sandbox_id: Identifier of the sandbox/agent to report on.
+        workflow_summary: Workflow metadata to fold into the state response.
+
+    Returns:
+        The provider state dict for the sandbox.
+
+    Raises:
+        HTTPException: 404 if the agent does not exist.
+    """
     agent = agent_manager.get(sandbox_id)
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
@@ -209,6 +320,20 @@ def delete_provider_session(
     sandbox_id: str,
     cleanup_worktree: bool = False,
 ) -> Dict[str, Any]:
+    """Terminate a provider session (sandbox) and report the result.
+
+    Kills the agent via the agent manager, optionally cleaning up its git
+    worktree, and returns a terminated-status payload in the shape Cerver
+    expects from the local provider.
+
+    Args:
+        agent_manager: The legacy agent manager owning the agent's lifecycle.
+        sandbox_id: Identifier of the sandbox/agent to terminate.
+        cleanup_worktree: When True, also remove the agent's git worktree.
+
+    Returns:
+        A dict confirming termination, echoing the sandbox id and provider.
+    """
     agent_manager.kill(sandbox_id, cleanup_worktree=cleanup_worktree)
     return {
         "success": True,
