@@ -64,6 +64,7 @@ OPTIONAL_BINARIES = (
     "codex",
     "claude",
     "grok",
+    "ollama",
     "npm",
     "go",
     "python3",

@@ -28,10 +28,17 @@ CERVER_COMPUTE_STATE_FILE = CONFIG_DIR / "cerver_compute.json"
 
 
 def _normalize_base_url(url: str) -> str:
+    """Strip surrounding whitespace and any trailing slash from a base URL."""
     return url.strip().rstrip("/")
 
 
 def _load_cerver_state() -> Dict[str, Any]:
+    """Load the persisted compute state, returning {} if missing or corrupt.
+
+    The state file (``~/.kompany/cerver_compute.json``) holds saved auth tokens
+    and per-identity compute ids keyed by URL. Any read or JSON error is
+    swallowed and treated as "no state" so a bad file never blocks startup.
+    """
     if not CERVER_COMPUTE_STATE_FILE.exists():
         return {}
 
@@ -42,11 +49,28 @@ def _load_cerver_state() -> Dict[str, Any]:
 
 
 def _save_cerver_state(state: Dict[str, Any]) -> None:
+    """Persist the compute state dict to ``~/.kompany/cerver_compute.json``.
+
+    Creates the config directory if needed and overwrites the file with
+    pretty-printed JSON.
+    """
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     CERVER_COMPUTE_STATE_FILE.write_text(json.dumps(state, indent=2))
 
 
 class CerverComputeClient:
+    """Registers a local machine with Cerver as a private compute.
+
+    Wraps the Cerver gateway's ``/v2/computes`` API: it authenticates (browser
+    device-code flow), registers the machine, keeps it alive with heartbeats,
+    and unregisters on shutdown. Auth tokens and the resolved ``compute_id`` are
+    persisted to ``~/.kompany/cerver_compute.json`` (keyed by gateway URL and a
+    derived identity) so restarts reuse the same compute without re-login.
+
+    Configuration falls back to the ``CERVER_GATEWAY_URL``, ``CERVER_OWNER_ID``,
+    and ``CERVER_API_TOKEN`` environment variables when arguments are omitted.
+    """
+
     def __init__(
         self,
         *,
@@ -57,6 +81,18 @@ class CerverComputeClient:
         provider: str = "cerver_local_provider",
         api_token: Optional[str] = None,
     ):
+        """Initialize the client and load any persisted auth and identity.
+
+        Args:
+            cerver_url: Gateway base URL; falls back to ``CERVER_GATEWAY_URL``
+                then :data:`DEFAULT_CERVER_URL`.
+            owner_id: Account owner id; falls back to ``CERVER_OWNER_ID``.
+            local_port: Port this machine's local runtime listens on.
+            machine_name: Human-readable label for the registered compute.
+            provider: Provider key reported to Cerver.
+            api_token: Bearer token; falls back to ``CERVER_API_TOKEN`` or a
+                previously persisted token.
+        """
         self.cerver_url = _normalize_base_url(
             cerver_url or os.environ.get("CERVER_GATEWAY_URL") or DEFAULT_CERVER_URL
         )
@@ -73,16 +109,25 @@ class CerverComputeClient:
 
     @property
     def enabled(self) -> bool:
+        """True when a gateway URL is configured (the client can register)."""
         return bool(self.cerver_url)
 
     def _auth_key(self) -> str:
+        """State-file key under which this gateway's auth token is stored."""
         return f"auth::{self.cerver_url}"
 
     def _identity_key(self) -> str:
+        """State-file key identifying this compute within the gateway.
+
+        Combines gateway URL, owner (or authenticated user, else "anonymous"),
+        provider, and local port so the same machine reuses one ``compute_id``
+        per distinct configuration.
+        """
         owner_key = self.owner_id or self.user_id or "anonymous"
         return f"{self.cerver_url}|{owner_key}|{self.provider}|{self.local_port}"
 
     def _load_persisted_auth(self) -> None:
+        """Restore a saved access token and user id from the state file."""
         state = _load_cerver_state()
         auth_state = state.get(self._auth_key())
         if not isinstance(auth_state, dict):
@@ -96,12 +141,14 @@ class CerverComputeClient:
             self.user_id = user_id
 
     def _load_persisted_identity(self) -> None:
+        """Restore the saved ``compute_id`` for this identity, if present."""
         state = _load_cerver_state()
         compute_id = state.get(self._identity_key())
         if isinstance(compute_id, str) and compute_id:
             self.compute_id = compute_id
 
     def _persist_auth(self) -> None:
+        """Save the current access token and user id to the state file."""
         if not self.api_token:
             return
 
@@ -124,6 +171,7 @@ class CerverComputeClient:
             _save_cerver_state(state)
 
     def _persist_identity(self) -> None:
+        """Save the current ``compute_id`` to the state file under this identity."""
         if not self.compute_id:
             return
 
@@ -132,18 +180,25 @@ class CerverComputeClient:
         _save_cerver_state(state)
 
     def ensure_compute_id(self) -> str:
+        """Return this compute's id, generating and persisting one if needed.
+
+        Allocates a stable ``comp_<hex>`` id on first use so the local side can
+        reference the compute before the gateway has confirmed registration.
+        """
         if not self.compute_id:
             self.compute_id = f"comp_{uuid.uuid4().hex[:16]}"
             self._persist_identity()
         return self.compute_id
 
     def _headers(self) -> Dict[str, str]:
+        """Build request headers, adding a bearer token when authenticated."""
         headers = {"Content-Type": "application/json"}
         if self.api_token:
             headers["Authorization"] = f"Bearer {self.api_token}"
         return headers
 
     def _build_metadata(self) -> Dict[str, Any]:
+        """Assemble the machine metadata block sent on register/heartbeat."""
         machine_state = get_machine_state()
         return {
             "machine_name": self.machine_name,
@@ -155,6 +210,11 @@ class CerverComputeClient:
         }
 
     def _build_connection(self) -> Dict[str, Any]:
+        """Describe how the gateway reaches this compute (cerver_connect).
+
+        Includes the ``connect_id`` and, when ``P69_API_TOKEN`` is set, the
+        local API token the gateway must present to call back into this runtime.
+        """
         connection: Dict[str, Any] = {
             "transport": "cerver_connect",
             "connect_id": self.ensure_compute_id(),
@@ -167,6 +227,11 @@ class CerverComputeClient:
         return connection
 
     def _build_register_payload(self) -> Dict[str, Any]:
+        """Build the full ``/v2/computes/register`` request body.
+
+        Bundles the label, kind, provider, runtime capabilities, machine
+        metadata, connection descriptor, and the ensured ``compute_id``.
+        """
         payload: Dict[str, Any] = {
             "label": self.machine_name,
             "kind": "local",
@@ -179,6 +244,18 @@ class CerverComputeClient:
         return payload
 
     async def ensure_authenticated(self) -> None:
+        """Obtain an access token via the browser device-code flow, if needed.
+
+        No-op when a token is already present. Otherwise starts a device-code
+        session against ``/v2/auth/device``, prints (and tries to open) the
+        verification URL and user code, then polls until the user approves,
+        denies, or the request expires. On approval the token and user id are
+        stored and persisted.
+
+        Raises:
+            RuntimeError: If approval returns no token, the user denies the
+                request, or it times out / expires before approval.
+        """
         if self.api_token:
             return
 
@@ -259,6 +336,19 @@ class CerverComputeClient:
         raise RuntimeError("Cerver auth retry exhausted")
 
     async def register(self) -> Dict[str, Any]:
+        """Register this machine as a compute with the Cerver gateway.
+
+        Authenticates first when neither a token nor an owner id is available,
+        then POSTs the register payload (with one automatic re-auth on 401).
+        Adopts the server-resolved ``compute_id`` and ``owner_id`` from the
+        response and persists the identity.
+
+        Returns:
+            The gateway's registration response payload.
+
+        Raises:
+            RuntimeError: If the client has no configured ``cerver_url``.
+        """
         if not self.enabled:
             raise RuntimeError("Cerver compute client is missing cerver_url")
 
@@ -282,6 +372,20 @@ class CerverComputeClient:
         return payload
 
     async def heartbeat(self, status: str = "online") -> Dict[str, Any]:
+        """Send a liveness heartbeat, registering first if not yet registered.
+
+        Reports the given status along with the current runtime capabilities and
+        machine metadata so the gateway keeps the compute marked available.
+
+        Args:
+            status: Liveness state to report (default ``"online"``).
+
+        Returns:
+            The gateway's heartbeat response payload.
+
+        Raises:
+            RuntimeError: If registration still yields no ``compute_id``.
+        """
         if not self.compute_id:
             await self.register()
 
@@ -349,6 +453,11 @@ class CerverComputeClient:
         return response.json()
 
     async def unregister(self) -> None:
+        """Best-effort removal of this compute from the gateway on shutdown.
+
+        No-op when nothing was registered. Any error during the DELETE is
+        swallowed so shutdown is never blocked by an unreachable gateway.
+        """
         if not self.compute_id:
             return
 

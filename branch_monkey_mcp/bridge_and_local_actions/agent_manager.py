@@ -50,6 +50,8 @@ def _model_provider_for_cli(cli_tool: str) -> str:
         "claude": "anthropic",
         "codex": "openai",
         "grok": "xai",
+        "gemma": "google",
+        "ollama": "ollama",
     }.get((cli_tool or "").lower(), "")
 
 

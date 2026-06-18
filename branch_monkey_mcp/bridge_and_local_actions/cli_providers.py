@@ -1231,6 +1231,135 @@ class GemmaProvider(CliProvider):
         return text.startswith(("warn:", "Warning:", "DeprecationWarning"))
 
 
+class OllamaProvider(CliProvider):
+    """Local open models via Ollama (https://ollama.com).
+
+    Ollama runs open-weight models — llama, mistral, gemma, qwen, phi —
+    on the user's own machine and serves them on an OpenAI-compatible
+    endpoint at http://localhost:11434/v1. Like Grok/Gemma there's no
+    vendor CLI to drive an agent loop, so we run the bundled
+    `ollama_runner` Python module, which speaks that endpoint and emits
+    claude stream-json.
+
+    Crucial difference from the hosted providers: "local" means localhost
+    *relative to wherever this runner executes*. The relay runs ON the
+    user's machine (local-relay compute), so the runner reaches the user's
+    Ollama. There's no API key and no per-token cost — it's their own
+    hardware. A remote/self-hosted Ollama works via OLLAMA_BASE_URL.
+    """
+
+    name = "ollama"
+    display_name = "Ollama"
+    install_hint = "install from https://ollama.com (or run: cerver-add-provider → Ollama)"
+    health_cmd = ["ollama", "--version"]
+    # No API key for local Ollama. OLLAMA_API_KEY is honored only for a
+    # remote endpoint sitting behind an auth proxy; it's optional.
+    api_key_env = "OLLAMA_API_KEY"
+    api_key_config = ""
+
+    def _base_url(self) -> Optional[str]:
+        base = os.environ.get("OLLAMA_BASE_URL")
+        if base:
+            return base
+        host = os.environ.get("OLLAMA_HOST")
+        if host:
+            host = host.strip()
+            if not host.startswith("http"):
+                host = f"http://{host}"
+            return host.rstrip("/") + "/v1"
+        return None
+
+    def is_available(self) -> Optional[str]:
+        # A configured remote endpoint means we can run regardless of a
+        # local binary. Otherwise availability == the ollama binary is
+        # installed (a good proxy for "the server can be reached locally").
+        if self._base_url():
+            return sys.executable
+        return _resolve_cli("ollama")
+
+    def health_check(self) -> dict:
+        """Probe the running server, not just the binary — Ollama can be
+        installed but not serving, or serving with no models pulled."""
+        base = self._base_url() or "http://localhost:11434/v1"
+        try:
+            import urllib.request
+            req = urllib.request.Request(base.rstrip("/") + "/models")
+            api_key = os.environ.get("OLLAMA_API_KEY")
+            if api_key:
+                req.add_header("Authorization", f"Bearer {api_key}")
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                data = json.loads(resp.read().decode())
+            models = [m.get("id") for m in (data.get("data") or []) if m.get("id")]
+            detail = (
+                f"{len(models)} model(s): {', '.join(models[:5])}"
+                if models
+                else "server up, no models pulled (try `ollama pull llama3.2`)"
+            )
+            return {"ok": bool(models), "path": self.is_available(), "detail": detail}
+        except Exception as e:
+            return {
+                "ok": False,
+                "path": self.is_available(),
+                "detail": f"server unreachable at {base} ({e}) — start it with `ollama serve`",
+            }
+
+    def get_auth_status(self) -> dict:
+        """Local Ollama needs no auth — 'authenticated' just means the
+        server is reachable and has at least one model."""
+        h = self.health_check()
+        if h.get("ok"):
+            return {"authenticated": True, "method": "local", "detail": h.get("detail", "local server")}
+        return {"authenticated": False, "method": "none", "detail": h.get("detail", "Ollama not reachable")}
+
+    def _ollama_command(self, prompt, output_format, model=None, system_prompt=None):
+        args = [
+            sys.executable, "-m",
+            "branch_monkey_mcp.bridge_and_local_actions.ollama_runner",
+            "-p", prompt,
+            "--output-format", output_format,
+        ]
+        if output_format == "stream-json":
+            args.append("--verbose")
+        if model:
+            args.extend(["--model", model])
+        if system_prompt:
+            args.extend(["--append-system-prompt", system_prompt])
+        # Pass through any endpoint/auth overrides so the runner sees them
+        # regardless of how the relay env was assembled.
+        inject: Dict[str, str] = {}
+        for k in ("OLLAMA_BASE_URL", "OLLAMA_HOST", "OLLAMA_API_KEY"):
+            v = os.environ.get(k)
+            if v:
+                inject[k] = v
+        return CliCommand(
+            args=args,
+            env_overrides={"CLAUDECODE": None},
+            env_inject=inject,
+        )
+
+    def build_run_command(self, prompt, system_prompt=None, model=None):
+        return self._ollama_command(prompt, "stream-json", model=model, system_prompt=system_prompt)
+
+    def build_text_command(self, prompt, system_prompt=None, use_mcp=False):
+        return self._ollama_command(prompt, "text", system_prompt=system_prompt)
+
+    def build_resume_command(self, prompt, session_id):
+        # Ollama's OpenAI-compat endpoint is stateless w.r.t. session_id —
+        # the relay re-feeds prior transcript each turn. Mirror Grok/Gemma.
+        return self._ollama_command(prompt, "stream-json")
+
+    def build_oneshot_command(self, prompt):
+        return self._ollama_command(prompt, "json")
+
+    def extract_session_id(self, event):
+        if event.get("type") == "system" and event.get("subtype") == "init":
+            return event.get("session_id")
+        return None
+
+    def is_noise(self, text):
+        return text.startswith(("warn:", "Warning:", "DeprecationWarning"))
+
+
 # --- Provider Registry ---
 
 _PROVIDERS: Dict[str, CliProvider] = {
@@ -1238,6 +1367,7 @@ _PROVIDERS: Dict[str, CliProvider] = {
     "codex": CodexProvider(),
     "grok": GrokProvider(),
     "gemma": GemmaProvider(),
+    "ollama": OllamaProvider(),
 }
 
 # Fallback default when no persistent config exists
