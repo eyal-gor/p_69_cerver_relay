@@ -29,10 +29,25 @@ _workflow_runs: dict[str, dict] = {}
 
 
 def _utc_now() -> datetime:
+    """Return the current time as a timezone-aware UTC datetime.
+
+    Used as the single clock source for workflow-run bookkeeping so that
+    every ``started_at``/``finished_at`` stamp is comparable and serializes
+    with an explicit UTC offset.
+    """
     return datetime.now(timezone.utc)
 
 
 def _cleanup_workflows() -> None:
+    """Drop workflow runs that finished longer than the retention window ago.
+
+    Iterates the in-memory ``_workflow_runs`` registry and evicts any run
+    whose ``finished_at`` is older than ``_WORKFLOW_RETENTION`` (6 hours).
+    Still-running entries (``finished_at`` is ``None``) are always kept.
+
+    Callers must already hold ``_workflow_lock``; this function does not
+    acquire it itself.
+    """
     cutoff = _utc_now() - _WORKFLOW_RETENTION
     stale_ids = []
     for workflow_id, run in _workflow_runs.items():
@@ -45,6 +60,20 @@ def _cleanup_workflows() -> None:
 
 
 def _start_workflow_run(name: str, working_dir: str) -> str:
+    """Register a new workflow run and return its short id.
+
+    Allocates an 8-character hex id, opportunistically prunes stale runs,
+    and records a fresh ``running`` entry in ``_workflow_runs`` stamped with
+    the current UTC start time. Acquires ``_workflow_lock`` internally.
+
+    Args:
+        name: Human-readable workflow name (e.g. the workflow file or label).
+        working_dir: Directory the workflow run executes against.
+
+    Returns:
+        The generated workflow id, used later to look the run up in
+        :func:`_finish_workflow_run`.
+    """
     workflow_id = uuid.uuid4().hex[:8]
     with _workflow_lock:
         _cleanup_workflows()
@@ -62,6 +91,20 @@ def _start_workflow_run(name: str, working_dir: str) -> str:
 
 
 def _finish_workflow_run(workflow_id: str, workflow_result: dict) -> None:
+    """Record the terminal outcome of a previously started workflow run.
+
+    Looks the run up by id and stamps it with the final status, finish time,
+    and any resume/error metadata pulled from ``workflow_result``. A
+    ``needs_approval`` result is mapped to the ``paused`` status so the run
+    surfaces as awaiting approval rather than finished. Unknown ids are
+    ignored (e.g. if the run was already evicted by retention cleanup).
+    Acquires ``_workflow_lock`` internally.
+
+    Args:
+        workflow_id: Id returned by :func:`_start_workflow_run`.
+        workflow_result: Result mapping from the workflow CLI, optionally
+            carrying ``status``, ``resume_from``, and ``error`` keys.
+    """
     with _workflow_lock:
         run = _workflow_runs.get(workflow_id)
         if not run:
@@ -75,6 +118,18 @@ def _finish_workflow_run(workflow_id: str, workflow_result: dict) -> None:
 
 
 def get_workflow_summary() -> dict:
+    """Summarize tracked workflow runs for the machine-stats endpoint.
+
+    Prunes stale runs, then returns aggregate status ``counts`` plus the 10
+    most recently started runs (newest first) serialized into JSON-friendly
+    dicts. Any run with an unrecognized status is folded into the ``error``
+    bucket. Acquires ``_workflow_lock`` internally.
+
+    Returns:
+        A dict with two keys: ``counts`` (a status -> count mapping over
+        running/paused/completed/failed/error) and ``runs`` (a list of
+        serialized recent runs with ISO-8601 timestamps).
+    """
     with _workflow_lock:
         _cleanup_workflows()
         counts = {
@@ -99,6 +154,11 @@ def get_workflow_summary() -> dict:
         )[:10]
 
         def _serialize(run: dict) -> dict:
+            """Convert an in-memory workflow run into a JSON-safe dict.
+
+            Renders the ``started_at``/``finished_at`` datetimes as ISO-8601
+            strings (or ``None``) and passes the remaining fields through.
+            """
             return {
                 "id": run["id"],
                 "name": run["name"],
@@ -660,6 +720,17 @@ async def stream_output(agent_id: str, request: Request):
     queue = agent_manager.add_listener(agent_id)
 
     async def event_generator():
+        """Yield Server-Sent Events for one agent output stream.
+
+        Emits an initial ``connected`` frame plus a ``worktree_info`` frame so
+        the frontend can render branch/worktree state, then a one-shot status
+        frame when the agent is already ``prepared`` (deferred start) or in a
+        terminal ``paused``/``completed``/``failed`` state. After that it
+        drains the per-listener queue, forwarding each event and stopping on an
+        ``exit`` event or client disconnect. A ``: heartbeat`` comment is sent
+        every 15 seconds of idle time to keep the connection alive. The
+        listener queue is always removed on exit via the ``finally`` block.
+        """
         try:
             init_event = {"type": "connected", "agentId": agent_id, "status": agent['status']}
             yield f"data: {json.dumps(init_event)}\n\n"
@@ -766,6 +837,18 @@ def get_machine_stats():
     workflow_summary = get_workflow_summary()
 
     def _safe_run(cmd: list[str]) -> Optional[str]:
+        """Run a short shell command and return its stripped stdout.
+
+        Wraps :func:`subprocess.run` with a 2-second timeout and swallows all
+        failures (non-zero exit, timeout, missing binary), returning ``None``
+        so machine-stats collection never raises on a probe command.
+
+        Args:
+            cmd: Command and arguments to execute.
+
+        Returns:
+            The trimmed standard output on success, otherwise ``None``.
+        """
         try:
             import subprocess as sp
 
@@ -777,6 +860,13 @@ def get_machine_stats():
         return None
 
     def _get_cpu_percent() -> Optional[float]:
+        """Estimate system-wide CPU utilization as a percentage.
+
+        Sums the per-process ``%cpu`` column from ``ps`` and normalizes by the
+        CPU count so the result reads as a single-core-equivalent percentage,
+        clamped to the range ``[0.0, 999.0]``. Returns ``None`` if ``ps``
+        produced no usable output.
+        """
         output = _safe_run(["ps", "-A", "-o", "%cpu="])
         if not output:
             return None
@@ -790,6 +880,18 @@ def get_machine_stats():
         return round(min(max(total / cpu_count, 0.0), 999.0), 1)
 
     def _get_memory_stats() -> dict:
+        """Collect physical-memory usage in a cross-platform way.
+
+        On macOS it derives used memory from ``sysctl hw.memsize`` and the
+        ``vm_stat`` page counters (free + inactive + speculative pages are
+        treated as available). On Linux it reads ``MemTotal``/``MemAvailable``
+        from ``/proc/meminfo``. All probe failures degrade gracefully, leaving
+        the corresponding fields as ``None``.
+
+        Returns:
+            A dict with ``total_bytes``, ``used_bytes``, and ``percent`` (the
+            used fraction rounded to one decimal, or ``None`` when unknown).
+        """
         total_bytes = None
         used_bytes = None
         system = sys.platform
@@ -846,6 +948,20 @@ def get_machine_stats():
         }
 
     def _get_disk_stats(path: Optional[str]) -> dict:
+        """Report disk usage for a path (or the default working dir).
+
+        Uses :func:`shutil.disk_usage` on ``path`` when given, otherwise the
+        configured default working directory. On any error it returns the same
+        shape with ``None`` byte counts so the stats response stays consistent.
+
+        Args:
+            path: Filesystem path to measure; falls back to the default
+                working directory when ``None``.
+
+        Returns:
+            A dict with ``path``, ``free_bytes``, ``total_bytes``,
+            ``used_bytes``, and ``percent`` (used fraction, or ``None``).
+        """
         try:
             import shutil
 
