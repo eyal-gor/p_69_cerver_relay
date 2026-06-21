@@ -139,6 +139,20 @@ class LocalAgentManager:
     RECENT_HISTORY_MAX = 30
 
     def __init__(self):
+        """Initialize the manager's in-memory agent registries.
+
+        Holds three structures, all process-local (nothing is persisted):
+
+        - ``_agents``: the live registry keyed by agent id. Bounded by
+          ``MAX_AGENTS``; entries are freed on ``complete_on_exit`` so a
+          finished one-shot reopens its slot for the next burst.
+        - ``_output_tasks``: the per-agent stdout-reader asyncio tasks, so
+          they can be cancelled on stop/cleanup.
+        - ``_recent_completed``: a fixed-size ``deque`` of recently-finished
+          one-shot agents (observation-only, see ``RECENT_HISTORY_TTL_SECONDS``
+          / ``RECENT_HISTORY_MAX``) so the relay TUI's Runtime tab shows
+          recent activity instead of "0 agents" between ``cerver run`` calls.
+        """
         self._agents: Dict[str, LocalAgent] = {}
         self._output_tasks: Dict[str, asyncio.Task] = {}
         # Recently-completed one-shot agents, kept around so the
@@ -511,6 +525,15 @@ class LocalAgentManager:
         provider = self._get_provider(agent)
 
         async def watchdog():
+            """Terminate the CLI subprocess if its stdout goes silent.
+
+            Polls every 15s while the agent is ``running``; if
+            ``last_activity`` is older than ``STALL_TIMEOUT_SEC`` it sets
+            ``agent.watchdog_killed`` and SIGTERMs the process, turning a
+            silent hang into a visible exit before the cerver-CLI client
+            times out. Returns (and is cancelled) once the agent leaves the
+            running state or the process exits.
+            """
             # Check every 15s. last_activity is bumped to now() on every
             # output line read below, so an alive CLI never trips this.
             try:
@@ -536,6 +559,15 @@ class LocalAgentManager:
         watchdog_task = asyncio.create_task(watchdog())
 
         def read_line():
+            """Blocking single-line read of the subprocess stdout.
+
+            Runs in an executor thread (stdout is a blocking pipe). Uses
+            ``select`` with a 0.5s timeout so it can re-check ``agent.status``
+            and the process exit code instead of blocking forever on a quiet
+            CLI. Returns the next raw line as bytes, or ``b''`` on EOF,
+            process exit, status change, or any error (the caller treats an
+            empty return as end-of-stream and breaks the read loop).
+            """
             try:
                 process = agent.process
                 stdout = process.stdout if process else None
@@ -1278,6 +1310,17 @@ class LocalAgentManager:
         entries = new_entries
 
         async def _push():
+            """Coroutine body scheduled as the fire-and-forget POST task.
+
+            Resolves the cerver transcript target, then POSTs the deduped
+            ``entries`` with a bounded retry budget (``backoffs`` ≈ 5.4s)
+            that covers 404s and 5xx/network errors — guarding the known
+            race where a push fires before cerver's session row has
+            committed. Every outcome is folded into ``agent._push_stats``
+            and, on terminal failure, ``agent._push_errors``; nothing is
+            raised back to the caller. If the target can't be resolved the
+            entries are dropped and the cause is logged once per agent.
+            """
             target = await self._resolve_cerver_target(agent)
             if target is None:
                 # Last-resort drop. Log once per agent so future runs surface
