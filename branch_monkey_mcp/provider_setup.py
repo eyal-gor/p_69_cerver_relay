@@ -43,6 +43,8 @@ NC     = "\033[0m"
 # verify (Modal, gRPC-only) get a skip-with-warning.
 
 def _verify_anthropic(creds: Dict[str, str]) -> Tuple[bool, str]:
+    """Verify ``ANTHROPIC_API_KEY`` via an authenticated GET to the Anthropic
+    ``/v1/models`` endpoint. Returns ``(ok, "HTTP <status>")``."""
     r = httpx.get(
         "https://api.anthropic.com/v1/models",
         headers={
@@ -55,6 +57,8 @@ def _verify_anthropic(creds: Dict[str, str]) -> Tuple[bool, str]:
 
 
 def _verify_openai(creds: Dict[str, str]) -> Tuple[bool, str]:
+    """Verify ``OPENAI_API_KEY`` via an authenticated GET to the OpenAI
+    ``/v1/models`` endpoint. Returns ``(ok, "HTTP <status>")``."""
     r = httpx.get(
         "https://api.openai.com/v1/models",
         headers={"Authorization": f"Bearer {creds['OPENAI_API_KEY']}"},
@@ -64,6 +68,8 @@ def _verify_openai(creds: Dict[str, str]) -> Tuple[bool, str]:
 
 
 def _verify_xai(creds: Dict[str, str]) -> Tuple[bool, str]:
+    """Verify ``XAI_API_KEY`` via an authenticated GET to the xAI
+    ``/v1/models`` endpoint. Returns ``(ok, "HTTP <status>")``."""
     r = httpx.get(
         "https://api.x.ai/v1/models",
         headers={"Authorization": f"Bearer {creds['XAI_API_KEY']}"},
@@ -73,6 +79,9 @@ def _verify_xai(creds: Dict[str, str]) -> Tuple[bool, str]:
 
 
 def _verify_google(creds: Dict[str, str]) -> Tuple[bool, str]:
+    """Verify ``GEMINI_API_KEY`` via an authenticated GET to Google's
+    OpenAI-compatible ``/v1beta/openai/models`` endpoint (used by the
+    Gemma provider). Returns ``(ok, "HTTP <status>")``."""
     r = httpx.get(
         "https://generativelanguage.googleapis.com/v1beta/openai/models",
         headers={"Authorization": f"Bearer {creds['GEMINI_API_KEY']}"},
@@ -82,6 +91,8 @@ def _verify_google(creds: Dict[str, str]) -> Tuple[bool, str]:
 
 
 def _verify_vercel(creds: Dict[str, str]) -> Tuple[bool, str]:
+    """Verify ``VERCEL_TOKEN`` via an authenticated GET to the Vercel
+    ``/v2/user`` endpoint. Returns ``(ok, "HTTP <status>")``."""
     r = httpx.get(
         "https://api.vercel.com/v2/user",
         headers={"Authorization": f"Bearer {creds['VERCEL_TOKEN']}"},
@@ -91,6 +102,8 @@ def _verify_vercel(creds: Dict[str, str]) -> Tuple[bool, str]:
 
 
 def _verify_e2b(creds: Dict[str, str]) -> Tuple[bool, str]:
+    """Verify ``E2B_API_KEY`` via an authenticated GET to the E2B
+    ``/sandboxes`` endpoint. Returns ``(ok, "HTTP <status>")``."""
     r = httpx.get(
         "https://api.e2b.dev/sandboxes",
         headers={"X-API-KEY": creds["E2B_API_KEY"]},
@@ -101,6 +114,8 @@ def _verify_e2b(creds: Dict[str, str]) -> Tuple[bool, str]:
 
 
 def _verify_daytona(creds: Dict[str, str]) -> Tuple[bool, str]:
+    """Verify ``DAYTONA_API_KEY`` via an authenticated GET to the Daytona
+    ``/api/workspaces`` endpoint. Returns ``(ok, "HTTP <status>")``."""
     r = httpx.get(
         "https://app.daytona.io/api/workspaces",
         headers={"Authorization": f"Bearer {creds['DAYTONA_API_KEY']}"},
@@ -407,6 +422,13 @@ def add_one_provider(cfg: Dict[str, str]) -> bool:
 
 
 def main() -> None:
+    """CLI entrypoint for ``cerver-add-provider``.
+
+    Loads the user's Infisical config (exiting with a pointer to the
+    installer if it is missing), then loops over :func:`add_one_provider`
+    until the user declines to add another. Prints progress and the final
+    summary to stdout.
+    """
     print()
     print(f"{ACCENT}{BOLD}cerver · add a provider{NC}")
     print(f"{MUTED}Pushes credentials to your Infisical. Cerver never sees them.{NC}")
