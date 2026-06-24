@@ -58,6 +58,40 @@ from .kompany_local_transport.relay_registration import (
     post_local_heartbeat,
 )
 
+from .relay_config import (
+    CERVER_ACCOUNT_ENV,
+    CERVER_DIR,
+    CERVER_INFISICAL_ENV,
+    CONFIG_DIR,
+    CURRENT_COMMIT_SHA,
+    DEFAULT_CLOUD_URL,
+    DEFAULT_STREAM_BRIDGE_URL,
+    FALLBACK_CLOUD_URL,
+    MACHINE_ID_FILE,
+    PERSISTENT_CONFIG_FILE,
+    RELAY_GITHUB_REPO,
+    TOKEN_FILE,
+    UPDATE_POLL_INTERVAL,
+    VERSION,
+    _compute_version,
+    _current_commit_sha,
+    _load_cerver_api_token,
+    fetch_cloud_url_from_config,
+    load_persistent_config,
+    save_persistent_config,
+)
+from .relay_launchd import (
+    LAUNCHD_LABEL,
+    LAUNCHD_PLIST_PATH,
+    _LEGACY_LAUNCHD_LABEL,
+    _LEGACY_LAUNCHD_PLIST_PATH,
+    _launchd_install,
+    _launchd_status,
+    _launchd_uninstall,
+    check_launchd_status,
+    install_launchd_service,
+)
+
 
 # Reconnection settings
 INITIAL_RECONNECT_DELAY = 1  # seconds
@@ -75,182 +109,6 @@ class ConnectionState(Enum):
     CONNECTED = "connected"
     RECONNECTING = "reconnecting"
 
-# Version — number of commits in the relay repo. Bakes at wheel build time
-# via hatch_build.VersionWriter (reads from branch_monkey_mcp/_version.py).
-# Falls back to a runtime `git rev-list` when developing from a working tree
-# without going through the build (pip install -e editable, source checkout).
-def _compute_version() -> str:
-    """Resolve the relay version string (the repo's commit count).
-
-    Prefers the baked-in ``COMMIT_COUNT`` written into ``_version.py`` at
-    wheel build time. When running from a working tree that skipped the
-    build (editable install, source checkout), falls back to a runtime
-    ``git rev-list --count HEAD``.
-
-    Returns:
-        The commit count as a string, or ``"0"`` if neither source is
-        available.
-    """
-    try:
-        from . import _version  # type: ignore
-        count = getattr(_version, "COMMIT_COUNT", "")
-        if count and str(count).isdigit():
-            return str(count)
-    except Exception:
-        pass
-    try:
-        pkg_dir = Path(__file__).resolve().parent.parent
-        result = subprocess.run(
-            ["git", "rev-list", "--count", "HEAD"],
-            cwd=str(pkg_dir),
-            capture_output=True,
-            text=True,
-            timeout=2,
-        )
-        count = (result.stdout or "").strip()
-        if result.returncode == 0 and count.isdigit():
-            return count
-    except Exception:
-        pass
-    return "0"
-
-
-VERSION = _compute_version()
-
-
-def _current_commit_sha() -> str:
-    """Best-effort: which commit this running process was built from."""
-    try:
-        from . import _version  # type: ignore
-        sha = getattr(_version, "COMMIT_SHA", "")
-        if sha:
-            return str(sha)
-    except Exception:
-        pass
-    try:
-        pkg_dir = Path(__file__).resolve().parent.parent
-        result = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=str(pkg_dir),
-            capture_output=True,
-            text=True,
-            timeout=2,
-        )
-        if result.returncode == 0:
-            return (result.stdout or "").strip()
-    except Exception:
-        pass
-    return ""
-
-
-CURRENT_COMMIT_SHA = _current_commit_sha()
-# Public github repo to poll for auto-updates. Same URL the install.sh uses
-# for uvx; can be overridden via env for forks.
-RELAY_GITHUB_REPO = os.environ.get(
-    # Canonical repo after the May 2026 rename. Old self-installed
-    # relays polling gneyal/p_69_branch_monkey_mcp keep working via
-    # GitHub's user+repo rename redirects (our httpx call has
-    # follow_redirects=True). New installs poll the canonical URL
-    # directly — one fewer redirect hop.
-    "RELAY_UPDATE_REPO", "eyal-gor/p_69_cerver_relay"
-)
-# How often to poll GitHub for a newer commit. Default 10 min — short enough
-# to roll out fixes within a coffee break, long enough to stay well under
-# GitHub's anonymous 60 req/hour rate limit.
-UPDATE_POLL_INTERVAL = int(os.environ.get("RELAY_UPDATE_INTERVAL_S", "600"))
-
-# Config file location
-CONFIG_DIR = Path.home() / ".kompany"
-TOKEN_FILE = CONFIG_DIR / "relay_token.json"
-MACHINE_ID_FILE = CONFIG_DIR / "machine_id"
-PERSISTENT_CONFIG_FILE = CONFIG_DIR / "config.json"
-
-# Cerver-side config — Infisical Universal Auth creds the relay uses to
-# fetch its own secrets at runtime. Lives under ~/.cerver/ to keep the
-# split clean between "kompany account state" (~/.kompany/) and "cerver
-# runtime secrets" (~/.cerver/). The install script (or the relay's first
-# launch, see _bootstrap_cerver_credentials) writes this file.
-CERVER_DIR = Path.home() / ".cerver"
-CERVER_INFISICAL_ENV = CERVER_DIR / "infisical.env"
-# install.sh writes the user's account token here as CERVER_API_KEY.
-# Launchd's plist doesn't source env files, so the relay has to read it
-# directly — otherwise `--cerver-only` starts a fresh device-auth flow
-# (pops /approve?code=… in the browser) on every respawn.
-CERVER_ACCOUNT_ENV = CERVER_DIR / "cerver.env"
-
-
-def _load_cerver_api_token() -> Optional[str]:
-    """Read the cerver account token from ~/.cerver/cerver.env.
-
-    Accepts both CERVER_API_TOKEN (historical name the relay reads from
-    os.environ) and CERVER_API_KEY (what install.sh writes today). Returns
-    None if the file is absent, unreadable, or contains neither key.
-    """
-    if not CERVER_ACCOUNT_ENV.exists():
-        return None
-    try:
-        for line in CERVER_ACCOUNT_ENV.read_text().splitlines():
-            line = line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            k, v = line.split("=", 1)
-            if k.strip() in ("CERVER_API_TOKEN", "CERVER_API_KEY"):
-                val = v.strip().strip('"').strip("'")
-                if val:
-                    return val
-    except Exception as e:
-        print(f"[Relay] Warning: failed to read {CERVER_ACCOUNT_ENV}: {e}")
-    return None
-
-# Cloud API URL - fallback if /api/config fetch fails
-FALLBACK_CLOUD_URL = "https://kompany.dev"
-
-# Stream bridge URL - Cloudflare Durable Object for direct streaming
-DEFAULT_STREAM_BRIDGE_URL = "https://stream-bridge.gneyal.workers.dev"
-
-
-def fetch_cloud_url_from_config(fallback_url: str = FALLBACK_CLOUD_URL) -> str:
-    """
-    Fetch the cloud URL from the /api/config endpoint.
-    This makes the relay domain-agnostic by reading the configured appDomain.
-    """
-    try:
-        import httpx
-        response = httpx.get(f"{fallback_url}/api/config", timeout=5.0)
-        if response.status_code == 200:
-            config = response.json()
-            app_domain = config.get("appDomain")
-            if app_domain:
-                cloud_url = f"https://{app_domain}"
-                print(f"[Relay] Using domain from config: {app_domain}")
-                return cloud_url
-    except Exception as e:
-        print(f"[Relay] Could not fetch config: {e}")
-    return fallback_url
-
-
-def load_persistent_config() -> Dict[str, Any]:
-    """Load persistent relay settings (home_dir, etc.)."""
-    if PERSISTENT_CONFIG_FILE.exists():
-        try:
-            with open(PERSISTENT_CONFIG_FILE) as f:
-                return json.load(f)
-        except Exception:
-            pass
-    return {}
-
-
-def save_persistent_config(updates: Dict[str, Any]):
-    """Save persistent relay settings (merges with existing)."""
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    config = load_persistent_config()
-    config.update(updates)
-    with open(PERSISTENT_CONFIG_FILE, "w") as f:
-        json.dump(config, f, indent=2)
-
-
-# Will be resolved at runtime
-DEFAULT_CLOUD_URL = FALLBACK_CLOUD_URL
 
 
 class RelayClient:
@@ -2893,264 +2751,6 @@ def _run_with_tui(args, home_dir, current_project, onboarding_needed=False):
 
     # TUI runs in main thread (blocks until quit)
     tui.run(stop_callback=lambda: relay_ref[0] and relay_ref[0].stop())
-
-
-LAUNCHD_LABEL = "dev.cerver.relay"
-LAUNCHD_PLIST_PATH = Path.home() / "Library" / "LaunchAgents" / f"{LAUNCHD_LABEL}.plist"
-
-# Legacy label from the kompany-only era. Kept here so a `branch-monkey-relay
-# install` (or any reinstall) can migrate the user off the stale plist —
-# the old one pointed at a uv archive path that became stale within hours
-# of each push and caused the May 2026 "ghost relay zombies my fixes"
-# incident. Migration: unload + delete + replace.
-_LEGACY_LAUNCHD_LABEL = "dev.kompany.relay"
-_LEGACY_LAUNCHD_PLIST_PATH = Path.home() / "Library" / "LaunchAgents" / f"{_LEGACY_LAUNCHD_LABEL}.plist"
-
-
-def check_launchd_status() -> dict:
-    """Check launchd service status. Returns dict with installed, running, pid."""
-    import subprocess
-
-    if sys.platform != "darwin":
-        return {"installed": False, "running": False, "pid": None}
-
-    if not LAUNCHD_PLIST_PATH.exists():
-        return {"installed": False, "running": False, "pid": None}
-
-    result = subprocess.run(
-        ["launchctl", "list", LAUNCHD_LABEL],
-        capture_output=True, text=True,
-    )
-    if result.returncode != 0:
-        return {"installed": True, "running": False, "pid": None}
-
-    # Parse output — launchctl list <label> outputs lines like: "PID" = 1234;
-    pid = None
-    for line in result.stdout.strip().splitlines():
-        cols = line.split()
-        if len(cols) >= 1 and cols[-1] == LAUNCHD_LABEL:
-            pid = cols[0] if cols[0] != "-" else None
-            break
-
-    return {"installed": True, "running": pid is not None, "pid": pid}
-
-
-def install_launchd_service(home_dir: str = None, machine_name: str = None) -> bool:
-    """Install the relay as a launchd service. Returns True on success.
-
-    Layout decisions baked in (and learned the hard way on 2026-05-19):
-
-      * **`uv tool uvx --refresh` over a pinned binary path.** The prior
-        plist hardcoded `/Users/<user>/.cache/uv/archive-v0/<id>/bin/
-        branch-monkey-relay` — that archive id became stale within hours
-        of every git push, and KeepAlive resurrected the stale binary
-        every 10 seconds, silently shadowing every fix the user had
-        just deployed. uvx --refresh resolves the latest commit from
-        github on every spawn. Trade-off: needs network at boot.
-
-      * **`cerver-relay --cerver-only` mode** is the install default.
-        The mixed-mode (kompany.dev + gateway.cerver.ai) era kept
-        two relays fighting for port 18081. Cerver-only is the single
-        source of truth.
-
-      * **ThrottleInterval 30s** (was 10s). Tight respawn loops mask
-        real failures — relay dies in 4s, restarts, dies in 4s, never
-        recovers. 30s lets Infisical / gateway return real errors and
-        reduces the odds of two restarts racing for port 18081.
-
-      * **Homebrew-first PATH.** The plist's PATH only needs to be rich
-        enough for `uv` to find `git` and `python` during refresh;
-        agent_environment.probe() expands it further per-subprocess.
-    """
-    import subprocess
-
-    if sys.platform != "darwin":
-        return False
-
-    uv_bin = shutil.which("uv") or "/Users/" + os.environ.get("USER", "") + "/.local/bin/uv"
-    if not Path(uv_bin).exists():
-        print("Error: uv not found. Install it first: curl -LsSf https://astral.sh/uv/install.sh | sh")
-        return False
-
-    if not home_dir:
-        persistent_cfg = load_persistent_config()
-        home_dir = persistent_cfg.get("home_dir")
-    working_dir = home_dir or str(Path.home() / "Code")
-    if not machine_name:
-        import socket as _socket
-        machine_name = _socket.gethostname().split(".")[0]
-
-    # Migrate off the legacy `dev.kompany.relay` plist if it's still
-    # there. KeepAlive on the old one would otherwise keep respawning
-    # alongside the new one, two relays fighting for 18081.
-    if _LEGACY_LAUNCHD_PLIST_PATH.exists():
-        subprocess.run(
-            ["launchctl", "unload", str(_LEGACY_LAUNCHD_PLIST_PATH)],
-            capture_output=True,
-        )
-        try:
-            _LEGACY_LAUNCHD_PLIST_PATH.unlink()
-            print(f"Migrated off legacy plist: {_LEGACY_LAUNCHD_PLIST_PATH}")
-        except OSError:
-            pass
-
-    program_args = [
-        uv_bin, "tool", "uvx", "--refresh",
-        "--from", "git+https://github.com/eyal-gor/p_69_cerver_relay.git",
-        "cerver-relay",
-        "--cerver-only",
-        "--cerver-url", "https://gateway.cerver.ai",
-        "--name", machine_name,
-    ]
-    args_xml = "\n".join(f"        <string>{a}</string>" for a in program_args)
-
-    plist_path_env = (
-        "/opt/homebrew/bin:/opt/homebrew/sbin:"
-        f"{Path.home()}/.local/bin:{Path.home()}/.bun/bin:{Path.home()}/.cargo/bin:"
-        "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
-    )
-
-    plist_content = f"""<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>{LAUNCHD_LABEL}</string>
-    <key>ProgramArguments</key>
-    <array>
-{args_xml}
-    </array>
-    <key>WorkingDirectory</key>
-    <string>{working_dir}</string>
-    <key>KeepAlive</key>
-    <true/>
-    <key>ThrottleInterval</key>
-    <integer>30</integer>
-    <key>StandardOutPath</key>
-    <string>{CONFIG_DIR / "relay.log"}</string>
-    <key>StandardErrorPath</key>
-    <string>{CONFIG_DIR / "relay.err.log"}</string>
-    <key>EnvironmentVariables</key>
-    <dict>
-        <key>PATH</key>
-        <string>{plist_path_env}</string>
-        <key>HOME</key>
-        <string>{Path.home()}</string>
-    </dict>
-</dict>
-</plist>
-"""
-
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    LAUNCHD_PLIST_PATH.parent.mkdir(parents=True, exist_ok=True)
-
-    if LAUNCHD_PLIST_PATH.exists():
-        subprocess.run(
-            ["launchctl", "unload", str(LAUNCHD_PLIST_PATH)],
-            capture_output=True,
-        )
-
-    LAUNCHD_PLIST_PATH.write_text(plist_content)
-
-    result = subprocess.run(
-        ["launchctl", "load", str(LAUNCHD_PLIST_PATH)],
-        capture_output=True, text=True,
-    )
-    return result.returncode == 0
-
-
-def _launchd_install():
-    """CLI handler for 'branch-monkey-relay install'.
-
-    No longer pre-checks for a `branch-monkey-relay` binary on PATH —
-    the new plist invokes `uv tool uvx --refresh git+…` so the binary
-    is resolved fresh from github on every spawn. The function only
-    needs `uv` itself, and install_launchd_service handles that check.
-    """
-    if sys.platform != "darwin":
-        print("Error: launchd services are only supported on macOS.")
-        sys.exit(1)
-
-    persistent_cfg = load_persistent_config()
-    home_dir = persistent_cfg.get("home_dir")
-    machine_name = persistent_cfg.get("machine_name")
-
-    if install_launchd_service(home_dir, machine_name=machine_name):
-        print(f"Service '{LAUNCHD_LABEL}' installed and started.")
-        print(f"  Plist: {LAUNCHD_PLIST_PATH}")
-        print(f"  Logs:  {CONFIG_DIR / 'relay.log'}")
-        print(f"  Errors: {CONFIG_DIR / 'relay.err.log'}")
-        print()
-        print("The relay will auto-start on login and restart if it crashes.")
-        print("Each spawn refreshes from github HEAD via `uv tool uvx --refresh`,")
-        print("so a new git push reaches you on the next ThrottleInterval cycle.")
-        print()
-        print("Use 'branch-monkey-relay uninstall' to remove the service.")
-    else:
-        print("Error: Failed to install launchd service.")
-        sys.exit(1)
-
-
-def _launchd_uninstall():
-    """Uninstall the branch-monkey-relay launchd service.
-
-    Also clears the legacy `dev.kompany.relay` plist if it's still
-    around — otherwise an `uninstall` would leave the user thinking
-    the autostart is gone while the old KeepAlive=true plist quietly
-    revives the relay on next login.
-    """
-    import subprocess
-
-    if sys.platform != "darwin":
-        print("Error: launchd services are only supported on macOS.")
-        sys.exit(1)
-
-    any_found = False
-    for label, path in (
-        (LAUNCHD_LABEL, LAUNCHD_PLIST_PATH),
-        (_LEGACY_LAUNCHD_LABEL, _LEGACY_LAUNCHD_PLIST_PATH),
-    ):
-        if not path.exists():
-            continue
-        any_found = True
-        result = subprocess.run(
-            ["launchctl", "unload", str(path)],
-            capture_output=True, text=True,
-        )
-        if result.returncode != 0:
-            print(f"Warning: launchctl unload {label} returned: {result.stderr.strip()}")
-        try:
-            path.unlink()
-            print(f"Service '{label}' uninstalled — removed {path}")
-        except OSError as exc:
-            print(f"Warning: could not remove {path}: {exc}")
-
-    if not any_found:
-        print(f"Service not installed (no plist at {LAUNCHD_PLIST_PATH}).")
-
-
-def _launchd_status():
-    """CLI handler for 'branch-monkey-relay status'."""
-    if sys.platform != "darwin":
-        print("Error: launchd services are only supported on macOS.")
-        sys.exit(1)
-
-    status = check_launchd_status()
-    if not status["installed"]:
-        print(f"Service not installed (no plist at {LAUNCHD_PLIST_PATH}).")
-        return
-
-    print(f"Service '{LAUNCHD_LABEL}':")
-    print(f"  Plist:  {LAUNCHD_PLIST_PATH}")
-    if status["running"]:
-        print(f"  PID:    {status['pid']}")
-        print(f"  Status: running")
-    else:
-        print(f"  Status: installed but not running")
-
-    log_path = CONFIG_DIR / "relay.log"
-    if log_path.exists():
-        print(f"  Log:    {log_path}")
 
 
 def main():
