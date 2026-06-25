@@ -79,6 +79,7 @@ class LocalAgent:
     session_id: Optional[str] = None
     callback: Optional[Dict] = None  # Cron completion callback info
     extra_env: Optional[Dict[str, str]] = None  # Project-scoped env vars (e.g. BUFFER_API_KEY) passed by kompany/cerver and inherited by the spawned CLI process.
+    pool_session: bool = False  # True = a pooled (borrowed-machine) session → run clean-room (no host env / vault, isolated HOME) with the harness pointed at the gateway proxy. See POOLS.md.
     # Cron-style runs complete on exit; chat-style runs pause and wait for
     # follow-up input. Both can carry a callback (chat needs one to publish
     # stream events to cerver), so we can't use callback presence as the
@@ -229,6 +230,7 @@ class LocalAgentManager:
         cli_model: Optional[str] = None,
         extra_env: Optional[Dict[str, str]] = None,
         complete_on_exit: bool = False,
+        pool_session: bool = False,
     ) -> dict:
         """Create and optionally start a new local AI agent.
 
@@ -338,6 +340,7 @@ class LocalAgentManager:
                 cli_model=(cli_model or ""),
                 callback=callback,
                 extra_env=extra_env,
+                pool_session=pool_session,
                 complete_on_exit=complete_on_exit,
             )
             self._agents[agent_id] = agent
@@ -375,6 +378,7 @@ class LocalAgentManager:
             cli_tool=provider.name,
             callback=callback,
             extra_env=extra_env,
+            pool_session=pool_session,
             complete_on_exit=complete_on_exit,
         )
 
@@ -442,7 +446,7 @@ class LocalAgentManager:
             provider, final_prompt, system_prompt=system_prompt,
             model=(agent.cli_model or None),
         )
-        process = spawn_cli_subprocess(cli_cmd, agent.work_dir, extra_env=agent.extra_env)
+        process = spawn_cli_subprocess(cli_cmd, agent.work_dir, extra_env=agent.extra_env, pool_session=agent.pool_session)
 
         agent.pid = process.pid
         agent.process = process
@@ -1603,7 +1607,7 @@ class LocalAgentManager:
 
         print(f"[LocalAgent] Resuming session {agent.session_id} with {provider.display_name}")
 
-        process = spawn_cli_subprocess(cli_cmd, agent.work_dir, extra_env=agent.extra_env)
+        process = spawn_cli_subprocess(cli_cmd, agent.work_dir, extra_env=agent.extra_env, pool_session=agent.pool_session)
 
         agent.process = process
         agent.pid = process.pid
