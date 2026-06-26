@@ -142,6 +142,9 @@ async def create_provider_session(
     # session metadata — the gateway threads it through; chat sessions
     # leave it unset so the resume path still works.
     complete_on_exit = bool(metadata.get("complete_on_exit", False)) if isinstance(metadata, dict) else False
+    # Pooled (borrowed-machine) session: the gateway sets this so the relay runs
+    # clean-room and the harness talks to the gateway proxy. See POOLS.md.
+    pool_session = bool(metadata.get("pool_session", False)) if isinstance(metadata, dict) else False
     created = await agent_manager.create(
         task_title=payload["title"],
         task_description=payload["description"],
@@ -155,6 +158,7 @@ async def create_provider_session(
         extra_env=extra_env,
         callback=callback,
         complete_on_exit=complete_on_exit,
+        pool_session=pool_session,
     )
 
     agent_id = created.get("id")

@@ -11,6 +11,7 @@ It only handles:
 
 import os
 import subprocess
+import tempfile
 from typing import Optional
 
 from ..bridge_and_local_actions.cli_providers import CliProvider, get_provider
@@ -51,7 +52,38 @@ _NODE_REDIRECT_VARS = (
 )
 
 
-def build_process_env(cli_cmd, extra_env: Optional[dict] = None) -> dict:
+def _clean_room_base_env(clean_home: Optional[str]) -> dict:
+    """Minimal env for a POOLED session running on a borrowed machine. Carries
+    no host secrets and no inherited tokens — just enough to find and run the
+    harness binary, with HOME isolated to a throwaway dir so the agent can't
+    read the machine owner's ~/.claude login, ~/.codex/auth.json, etc. The only
+    credential path is the gateway-injected extra_env (base-URL + ephemeral
+    token). See POOLS.md §relay clean-room."""
+    home = clean_home or tempfile.mkdtemp(prefix="cerver-pool-")
+    tmp = os.path.join(home, "tmp")
+    try:
+        os.makedirs(tmp, exist_ok=True)
+    except OSError:
+        tmp = tempfile.gettempdir()
+    return {
+        # PATH is a search-path list, not a secret; the probe below overwrites
+        # it, but seed it so the binary is findable even if the probe is cold.
+        "PATH": os.environ.get("PATH", ""),
+        "HOME": home,
+        "TMPDIR": tmp,
+        "USER": "cerver-pool",
+        "LANG": os.environ.get("LANG", "en_US.UTF-8"),
+        "LC_ALL": os.environ.get("LC_ALL", os.environ.get("LANG", "en_US.UTF-8")),
+        "TERM": os.environ.get("TERM", "xterm-256color"),
+    }
+
+
+def build_process_env(
+    cli_cmd,
+    extra_env: Optional[dict] = None,
+    pool_session: bool = False,
+    clean_home: Optional[str] = None,
+) -> dict:
     """Build the environment for a CLI command.
 
     Layering, lowest → highest precedence:
@@ -70,7 +102,10 @@ def build_process_env(cli_cmd, extra_env: Optional[dict] = None) -> dict:
     extra_env: caller-supplied env vars (e.g. project-scoped secrets passed
     through from kompany or cerver session metadata).
     """
-    env = os.environ.copy()
+    # Clean-room for pooled (borrowed-machine) sessions: do NOT inherit the
+    # host env or (below) the contributor's Infisical vault. Start from a
+    # minimal base with an isolated HOME. Otherwise: the normal full host env.
+    env = _clean_room_base_env(clean_home) if pool_session else os.environ.copy()
 
     # Always remove CLAUDECODE to allow nested launches.
     env.pop("CLAUDECODE", None)
@@ -97,7 +132,9 @@ def build_process_env(cli_cmd, extra_env: Optional[dict] = None) -> dict:
     # Layer Infisical-fetched secrets first so a rotated key in the vault
     # reaches the next CLI spawn without a relay restart — but only when
     # the provider hasn't explicitly overridden the same var.
-    if infisical_configured():
+    # Vault secrets are the CONTRIBUTOR's — never layer them into a pooled
+    # session running someone else's job.
+    if not pool_session and infisical_configured():
         infisical_env = get_secrets_sync()
         if infisical_env:
             env.update(infisical_env)
@@ -168,7 +205,12 @@ def build_resume_cli_command(
     return provider.build_resume_command(message, session_id)
 
 
-def spawn_cli_subprocess(cli_cmd, cwd: str, extra_env: Optional[dict] = None) -> subprocess.Popen:
+def spawn_cli_subprocess(
+    cli_cmd,
+    cwd: str,
+    extra_env: Optional[dict] = None,
+    pool_session: bool = False,
+) -> subprocess.Popen:
     """Spawn a CLI subprocess for the given command.
 
     extra_env: project-scoped env vars (secrets, config) to layer on top of
@@ -185,7 +227,14 @@ def spawn_cli_subprocess(cli_cmd, cwd: str, extra_env: Optional[dict] = None) ->
     flushed on every write, the JSON-line reader gets events as the CLI
     emits them.
     """
-    env = build_process_env(cli_cmd, extra_env=extra_env)
+    # For a pooled session, run clean-room with HOME isolated to the session's
+    # own workspace (cwd) so the borrowed machine's owner creds stay invisible.
+    env = build_process_env(
+        cli_cmd,
+        extra_env=extra_env,
+        pool_session=pool_session,
+        clean_home=cwd if pool_session else None,
+    )
     return subprocess.Popen(
         cli_cmd.args,
         stdout=subprocess.PIPE,
