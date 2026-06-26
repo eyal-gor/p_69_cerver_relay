@@ -82,6 +82,15 @@ class DevServerManager:
     """Manages the full lifecycle of local dev-server processes."""
 
     def __init__(self):
+        """Initialise the manager and recover state from a prior relay run.
+
+        Creates the in-memory ``_servers`` (run_id -> status dict) and
+        ``_tunnels`` (run_id -> ngrok tunnel) registries, ensures the
+        ``dev_servers`` SQLite table exists, then rehydrates ``_servers``
+        from that table so servers spawned before a relay restart remain
+        tracked. A module-level singleton (:data:`manager`) is instantiated
+        once at import time.
+        """
         self._servers: Dict[str, dict] = {}
         self._tunnels: Dict[str, object] = {}
         # Initialise DB table and recover servers that survived a relay restart
@@ -226,9 +235,27 @@ class DevServerManager:
     # ------------------------------------------------------------------
 
     def start_tunnel(self, port: int, run_id: str) -> Optional[str]:
+        """Open an ngrok tunnel to ``port``, keyed by ``run_id``.
+
+        Public wrapper over :meth:`_start_tunnel` exposed so advanced.py's
+        time-machine flow can reuse tunnel management.
+
+        Args:
+            port: Local port the dev server is listening on.
+            run_id: Identifier the tunnel is tracked under in ``_tunnels``.
+
+        Returns:
+            The public ngrok URL, or ``None`` if pyngrok is unavailable or
+            the connection fails.
+        """
         return self._start_tunnel(port, run_id)
 
     def stop_tunnel(self, run_id: str):
+        """Tear down the ngrok tunnel tracked under ``run_id``, if any.
+
+        Public wrapper over :meth:`_stop_tunnel`. A no-op when no tunnel is
+        tracked for ``run_id``.
+        """
         self._stop_tunnel(run_id)
 
     # ------------------------------------------------------------------
@@ -236,6 +263,12 @@ class DevServerManager:
     # ------------------------------------------------------------------
 
     def _ensure_proxy(self):
+        """Lazily start the shared dev proxy if it isn't already running.
+
+        The proxy is the single front door that routes incoming requests to
+        whichever dev server is the active target, so it must be up before
+        any server is registered. Idempotent.
+        """
         if not _proxy_state["running"]:
             start_dev_proxy()
 
@@ -271,6 +304,26 @@ class DevServerManager:
         return None
 
     def _resolve_worktree(self, task_number: int, worktree_path: Optional[str], project_path: Optional[str]) -> str:
+        """Resolve the directory the dev server should run in.
+
+        Resolution order: an explicit ``worktree_path`` (validated to exist),
+        then a worktree discovered for ``task_number`` via
+        :func:`find_worktree_path`, then ``project_path`` itself as a fallback
+        for cases with no worktree (e.g. main-chat).
+
+        Args:
+            task_number: Task whose worktree should be located.
+            worktree_path: Caller-supplied worktree path, if known.
+            project_path: Project root used both for worktree discovery and as
+                the last-resort run directory.
+
+        Returns:
+            An existing directory path to spawn the dev server in.
+
+        Raises:
+            HTTPException: 404 if an explicit ``worktree_path`` does not exist,
+                or if no worktree (and no usable ``project_path``) is found.
+        """
         from fastapi import HTTPException
 
         if worktree_path:
@@ -295,6 +348,20 @@ class DevServerManager:
 
     @staticmethod
     def _find_available_port(base: int) -> int:
+        """Return the first free TCP port at or above ``base`` on localhost.
+
+        Probes ports sequentially with a non-blocking connect; a port that
+        refuses the connection is considered free.
+
+        Args:
+            base: Lowest port number to try.
+
+        Returns:
+            An available port in ``[base, base + 100]``.
+
+        Raises:
+            RuntimeError: If every port in that range is in use.
+        """
         port = base
         while True:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -444,6 +511,16 @@ class DevServerManager:
     # --- Tunnel wrappers ---
 
     def _start_tunnel(self, port: int, run_id: str) -> Optional[str]:
+        """Open an ngrok HTTP tunnel to ``port`` and record it under ``run_id``.
+
+        Args:
+            port: Local port to expose.
+            run_id: Key the resulting tunnel is stored under in ``_tunnels``.
+
+        Returns:
+            The public tunnel URL, or ``None`` if pyngrok is not installed or
+            the connection raises (the error is logged, not propagated).
+        """
         if not NGROK_AVAILABLE:
             print("[DevServerManager] pyngrok not installed — tunnel unavailable")
             return None
@@ -457,6 +534,12 @@ class DevServerManager:
             return None
 
     def _stop_tunnel(self, run_id: str):
+        """Disconnect and forget the ngrok tunnel tracked under ``run_id``.
+
+        Pops the tunnel from ``_tunnels`` and disconnects it via ngrok.
+        A no-op if no tunnel is tracked; disconnect errors are logged, not
+        raised.
+        """
         tun = self._tunnels.pop(run_id, None)
         if tun:
             try:
