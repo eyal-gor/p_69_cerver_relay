@@ -1,45 +1,16 @@
 """
 Task management tools.
-"""
 
-import subprocess
-import re
+The thin ``@mcp.tool()`` wrappers below define the MCP schema; the heavier
+implementations (workflow guidance, PR creation, completion bookkeeping,
+artifact assembly) live in ``task_services.py``.
+"""
 
 from .. import state
 from ..api_client import api_get, api_post, api_put, api_delete
 from ..mcp_app import mcp
-
-
-def auto_log_activity(tool_name: str, duration: float = 0):
-    """Automatically log tool activity when a task is active."""
-    if state.CURRENT_TASK_ID is None:
-        return
-
-    try:
-        from datetime import datetime
-
-        data = {
-            "timestamp": datetime.utcnow().isoformat() + "Z",
-            "provider": "mcp",
-            "model": "claude-tool-call",
-            "input_tokens": 0,
-            "output_tokens": 0,
-            "total_tokens": 0,
-            "cost": 0,
-            "duration": duration,
-            "prompt_preview": f"Tool: {tool_name}",
-            "response_preview": "",
-            "status": "success",
-            "session_id": state.CURRENT_SESSION_ID,
-            "tool_name": tool_name,
-            "git_email": state.GIT_USER_EMAIL,
-            "task_id": state.CURRENT_TASK_ID,
-            "task_title": state.CURRENT_TASK_TITLE
-        }
-
-        api_post("/api/prompt-logs", data)
-    except Exception:
-        pass
+from . import task_services
+from .task_services import auto_log_activity
 
 
 @mcp.tool()
@@ -179,79 +150,7 @@ def kompany_task_work(task_id: int, workflow: str = "execute") -> str:
             - "execute": Implementation - create worktree, code, PR, complete with context
             - "workspace": Non-code task - runs in project dir, saves outputs as contexts
     """
-    # Validate workflow
-    valid_workflows = ["ask", "plan", "execute", "workspace"]
-    if workflow not in valid_workflows:
-        return f"❌ Invalid workflow '{workflow}'. Must be one of: {', '.join(valid_workflows)}"
-
-    try:
-        # Start working on task (workflow is guidance only, not stored)
-        result = api_post(f"/api/tasks/{task_id}/work")
-        task = result.get("task", {})
-
-        state.CURRENT_TASK_ID = task_id
-        state.CURRENT_TASK_TITLE = task.get('title', 'Unknown')
-
-        auto_log_activity("task_work_start", duration=1)
-
-        # Workflow-specific instructions
-        if workflow == "ask":
-            next_steps = """**Next Steps (Ask Workflow):**
-1. Research/explore to answer the question
-2. Use `kompany_task_log` to record findings
-3. Use `kompany_task_update` to mark done when answered"""
-        elif workflow == "plan":
-            next_steps = """**Next Steps (Plan Workflow):**
-1. Research the codebase and requirements
-2. Create a plan/design document
-3. Use `kompany_task_log` to record the plan
-4. Get user approval before implementing
-5. If approved, switch to execute workflow or create sub-tasks"""
-        elif workflow == "workspace":
-            next_steps = f"""**Next Steps (Workspace Workflow):**
-1. Work on the task (research, analysis, writing, etc.)
-2. Use `kompany_task_log(task_id={task_id}, content="...")` to record progress
-3. Save outputs using `kompany_context_create(name="...", content="...", context_type="general")`
-4. Complete: `kompany_task_complete(task_id={task_id}, summary="...")`
-
-No worktree or PR needed — results are saved as Kompany contexts."""
-        else:  # execute
-            next_steps = f"""**Next Steps (Execute Workflow):**
-
-**Step 1: Create Worktree** (isolates your changes)
-```bash
-git worktree add .worktrees/task-{task_id} -b task/{task_id}-short-description
-cd .worktrees/task-{task_id}
-```
-
-**Step 2: Implement Changes**
-- Make changes in the worktree (NOT the main repo)
-- Use `kompany_task_log()` to record progress
-
-**Step 3: Commit & Push**
-```bash
-git add .
-git commit -m "Task #{task_id}: description
-
-Co-Authored-By: Kompany.dev via Claude Code"
-git push -u origin task/{task_id}-short-description
-```
-
-**Step 4: Complete Task**
-`kompany_task_complete(task_id={task_id}, summary="...", worktree_path=".worktrees/task-{task_id}")`
-
-This creates a GitHub PR. The user reviews and merges it (NOT auto-merged)."""
-
-        return f"""# Working on Task {task_id}: {task.get('title', 'Unknown')}
-
-**Workflow:** {workflow.upper()}
-**Status:** in_progress
-**Description:** {task.get('description') or '(none)'}
-**Version:** {task.get('version') or 'backlog'}
-
-{next_steps}"""
-    except Exception as e:
-        return f"Error: {str(e)}"
+    return task_services.start_task_work(task_id, workflow)
 
 
 @mcp.tool()
@@ -290,117 +189,9 @@ def kompany_task_complete(
         files_changed: Comma-separated list of files that were modified (e.g., "src/foo.ts, src/bar.ts")
         context_name: Optional name for the context (defaults to task title)
     """
-    try:
-        github_pr_url = None
-        pr_output = ""
-
-        if not worktree_path:
-            # No worktree = non-code task (workspace/ask/plan) — skip PR
-            pr_output = "No worktree — skipping PR creation"
-        else:
-            # Try to create PR using gh CLI
-            try:
-                pr_result = subprocess.run(
-                    ["gh", "pr", "create", "--fill"],
-                    capture_output=True,
-                    text=True,
-                    timeout=60,
-                    cwd=worktree_path
-                )
-                pr_output = pr_result.stdout + pr_result.stderr
-
-                # Extract PR URL from output (gh pr create outputs the URL)
-                pr_match = re.search(r'https://github\.com/[^/]+/[^/]+/pull/\d+', pr_output)
-                if pr_match:
-                    github_pr_url = pr_match.group(0)
-            except FileNotFoundError:
-                pr_output = "gh CLI not found - skipping PR creation"
-            except subprocess.TimeoutExpired:
-                pr_output = "gh pr create timed out"
-            except Exception as e:
-                pr_output = f"PR creation failed: {str(e)}"
-
-        payload = {"summary": summary}
-        if github_pr_url:
-            payload["github_pr_url"] = github_pr_url
-        if files_changed:
-            payload["files_changed"] = files_changed
-        # Use /in_review endpoint to move task to "In Review" status for human verification
-        result = api_post(f"/api/tasks/{task_id}/in_review", payload)
-        task = result.get("task", {})
-        task_title = task.get('title', 'Unknown')
-        task_uuid = task.get('id')
-
-        auto_log_activity("task_complete", duration=1)
-
-        state.CURRENT_TASK_ID = None
-        state.CURRENT_TASK_TITLE = None
-
-        output = f"✅ Task {task_id} completed: {task_title}\n\nSummary: {summary}"
-        if github_pr_url:
-            output += f"\n\n🔗 PR created: {github_pr_url}"
-        elif pr_output:
-            output += f"\n\n⚠️ PR: {pr_output}"
-
-        # Auto-create and link context if project is focused
-        context_id = None
-        if state.CURRENT_PROJECT_ID and task_uuid:
-            try:
-                # Build context content
-                context_content = ""
-                if files_changed:
-                    context_content += f"Files changed:\n"
-                    for f in files_changed.split(","):
-                        context_content += f"- {f.strip()}\n"
-                    context_content += "\n"
-                context_content += summary
-
-                # Create context
-                ctx_name = context_name or f"Task #{task_id}: {task_title[:50]}"
-                ctx_result = api_post("/api/contexts", {
-                    "name": ctx_name,
-                    "content": context_content,
-                    "context_type": "code",
-                    "project_id": state.CURRENT_PROJECT_ID
-                })
-                context = ctx_result.get("context", ctx_result)
-                context_id = context.get("id")
-
-                # Link context to task
-                if context_id:
-                    api_post(f"/api/contexts/task/{task_uuid}", {"context_id": context_id})
-                    output += f"\n\n📎 Context created and linked: {ctx_name}"
-
-            except Exception as ctx_err:
-                output += f"\n\n⚠️ Could not create context: {str(ctx_err)}"
-
-        # Create notification for task completion
-        try:
-            notif_title = f"Task #{task_id} completed"
-            notif_message = summary[:200]
-            if github_pr_url:
-                notif_message += f"\nPR: {github_pr_url}"
-
-            # Link to the generated context if available, otherwise PR
-            notif_link = None
-            if context_id:
-                notif_link = f"/context?id={context_id}"
-            elif github_pr_url:
-                notif_link = github_pr_url
-
-            api_post("/api/notifications", {
-                "project_id": state.CURRENT_PROJECT_ID,
-                "type": "success",
-                "title": notif_title,
-                "message": notif_message,
-                "link": notif_link
-            })
-        except Exception:
-            pass  # Non-critical
-
-        return output
-    except Exception as e:
-        return f"Error completing task: {str(e)}"
+    return task_services.complete_task(
+        task_id, summary, worktree_path, files_changed, context_name
+    )
 
 
 @mcp.tool()
@@ -440,43 +231,9 @@ def kompany_task_add_artifact(
         filename: For file artifacts: the filename
         metadata: Optional JSON string of extra key-value pairs
     """
-    try:
-        import json as _json
-
-        artifact = {"type": artifact_type, "body": body}
-        if platform:
-            artifact["platform"] = platform
-        if title:
-            artifact["title"] = title
-        if subject:
-            artifact["subject"] = subject
-        if to:
-            artifact["to"] = to
-        if url:
-            artifact["url"] = url
-        if filename:
-            artifact["filename"] = filename
-        if metadata:
-            try:
-                artifact["metadata"] = _json.loads(metadata)
-            except _json.JSONDecodeError:
-                pass
-
-        # Fetch current artifacts
-        result = api_get(f"/api/tasks/{task_id}")
-        task = result.get("task", result)
-        current_artifacts = task.get("artifacts") or []
-
-        # Append new artifact
-        current_artifacts.append(artifact)
-
-        # Update task
-        api_put(f"/api/tasks/{task_id}", {"artifacts": current_artifacts})
-
-        count = len(current_artifacts)
-        return f"✅ Added {artifact_type} artifact to task (total: {count}). The Decision Preparer will package this into a decision when the task moves to review."
-    except Exception as e:
-        return f"Error adding artifact: {str(e)}"
+    return task_services.add_task_artifact(
+        task_id, artifact_type, body, platform, title, subject, to, url, filename, metadata
+    )
 
 
 @mcp.tool()
