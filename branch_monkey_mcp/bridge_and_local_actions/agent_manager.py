@@ -80,6 +80,7 @@ class LocalAgent:
     callback: Optional[Dict] = None  # Cron completion callback info
     extra_env: Optional[Dict[str, str]] = None  # Project-scoped env vars (e.g. BUFFER_API_KEY) passed by kompany/cerver and inherited by the spawned CLI process.
     pool_session: bool = False  # True = a pooled (borrowed-machine) session → run clean-room (no host env / vault, isolated HOME) with the harness pointed at the gateway proxy. See POOLS.md.
+    agents_md: Optional[str] = None  # A saved agent's AGENTS.md — written into the session workspace before spawn so the harness reads it as project instructions.
     # Cron-style runs complete on exit; chat-style runs pause and wait for
     # follow-up input. Both can carry a callback (chat needs one to publish
     # stream events to cerver), so we can't use callback presence as the
@@ -231,6 +232,7 @@ class LocalAgentManager:
         extra_env: Optional[Dict[str, str]] = None,
         complete_on_exit: bool = False,
         pool_session: bool = False,
+        agents_md: Optional[str] = None,
     ) -> dict:
         """Create and optionally start a new local AI agent.
 
@@ -341,6 +343,7 @@ class LocalAgentManager:
                 callback=callback,
                 extra_env=extra_env,
                 pool_session=pool_session,
+                agents_md=agents_md,
                 complete_on_exit=complete_on_exit,
             )
             self._agents[agent_id] = agent
@@ -379,6 +382,7 @@ class LocalAgentManager:
             callback=callback,
             extra_env=extra_env,
             pool_session=pool_session,
+            agents_md=agents_md,
             complete_on_exit=complete_on_exit,
         )
 
@@ -446,6 +450,15 @@ class LocalAgentManager:
             provider, final_prompt, system_prompt=system_prompt,
             model=(agent.cli_model or None),
         )
+        # A saved agent's AGENTS.md → drop it into the workspace so the harness
+        # reads it as project instructions (cerver run --agent <slug>).
+        if getattr(agent, "agents_md", None) and agent.work_dir:
+            try:
+                os.makedirs(agent.work_dir, exist_ok=True)
+                with open(os.path.join(agent.work_dir, "AGENTS.md"), "w", encoding="utf-8") as _amd:
+                    _amd.write(agent.agents_md)
+            except OSError as _amd_err:
+                print(f"[agent] could not write AGENTS.md: {_amd_err}")
         process = spawn_cli_subprocess(cli_cmd, agent.work_dir, extra_env=agent.extra_env, pool_session=agent.pool_session)
 
         agent.pid = process.pid
@@ -1607,6 +1620,15 @@ class LocalAgentManager:
 
         print(f"[LocalAgent] Resuming session {agent.session_id} with {provider.display_name}")
 
+        # A saved agent's AGENTS.md → drop it into the workspace so the harness
+        # reads it as project instructions (cerver run --agent <slug>).
+        if getattr(agent, "agents_md", None) and agent.work_dir:
+            try:
+                os.makedirs(agent.work_dir, exist_ok=True)
+                with open(os.path.join(agent.work_dir, "AGENTS.md"), "w", encoding="utf-8") as _amd:
+                    _amd.write(agent.agents_md)
+            except OSError as _amd_err:
+                print(f"[agent] could not write AGENTS.md: {_amd_err}")
         process = spawn_cli_subprocess(cli_cmd, agent.work_dir, extra_env=agent.extra_env, pool_session=agent.pool_session)
 
         agent.process = process

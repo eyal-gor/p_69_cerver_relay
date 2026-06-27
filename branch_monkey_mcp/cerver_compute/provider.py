@@ -155,6 +155,10 @@ async def create_provider_session(
     # Pooled (borrowed-machine) session: the gateway sets this so the relay runs
     # clean-room and the harness talks to the gateway proxy. See POOLS.md.
     pool_session = bool(metadata.get("pool_session", False)) if isinstance(metadata, dict) else False
+    # A saved agent's AGENTS.md, threaded through to be written into the workspace.
+    agents_md = metadata.get("agents_md") if isinstance(metadata, dict) else None
+    if not isinstance(agents_md, str):
+        agents_md = None
     created = await agent_manager.create(
         task_title=payload["title"],
         task_description=payload["description"],
@@ -169,6 +173,7 @@ async def create_provider_session(
         callback=callback,
         complete_on_exit=complete_on_exit,
         pool_session=pool_session,
+        agents_md=agents_md,
     )
 
     agent_id = created.get("id")
