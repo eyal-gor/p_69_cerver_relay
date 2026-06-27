@@ -135,6 +135,16 @@ async def create_provider_session(
         metadata.get("cerver_session_id") if isinstance(metadata, dict) else None
     )
     callback = {"cerver_session_id": cerver_session_id} if cerver_session_id else None
+    # Pool sessions also carry cerver_url + an ephemeral token so the relay can
+    # push status/transcript for a session it doesn't own (the gateway sets
+    # these). Without them the relay falls back to its connect transport, which
+    # has no api_token in --cerver-only mode -> "missing cerver fields", and the
+    # session never reports back. Normal sessions omit them and use the fallback.
+    if callback and isinstance(metadata, dict):
+        if metadata.get("cerver_url"):
+            callback["cerver_url"] = metadata["cerver_url"]
+        if metadata.get("cerver_api_token"):
+            callback["cerver_api_token"] = metadata["cerver_api_token"]
     # `complete_on_exit=True` tells the agent_manager to clean up the
     # agent record as soon as the CLI process ends, instead of parking
     # it in `paused` for a follow-up `--resume`. One-shot callers
