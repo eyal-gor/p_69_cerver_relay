@@ -446,19 +446,20 @@ class LocalAgentManager:
     def _start_cli_process(self, agent: LocalAgent, final_prompt: str, system_prompt: Optional[str] = None) -> None:
         """Spawn the CLI process and start reading output."""
         provider = self._get_provider(agent)
+        # A saved agent's instructions (cerver run --agent <slug>) are injected as
+        # the harness SYSTEM PROMPT — claude via --append-system-prompt, codex via
+        # its merged-prompt temp file. This is harness-correct (Claude reads
+        # CLAUDE.md, never AGENTS.md) and doesn't clobber files in the workspace,
+        # which an AGENTS.md/CLAUDE.md drop in the shared work_dir would.
+        effective_system_prompt = system_prompt
+        if getattr(agent, "agents_md", None):
+            effective_system_prompt = (
+                f"{system_prompt}\n\n{agent.agents_md}" if system_prompt else agent.agents_md
+            )
         cli_cmd = build_run_cli_command(
-            provider, final_prompt, system_prompt=system_prompt,
+            provider, final_prompt, system_prompt=effective_system_prompt,
             model=(agent.cli_model or None),
         )
-        # A saved agent's AGENTS.md → drop it into the workspace so the harness
-        # reads it as project instructions (cerver run --agent <slug>).
-        if getattr(agent, "agents_md", None) and agent.work_dir:
-            try:
-                os.makedirs(agent.work_dir, exist_ok=True)
-                with open(os.path.join(agent.work_dir, "AGENTS.md"), "w", encoding="utf-8") as _amd:
-                    _amd.write(agent.agents_md)
-            except OSError as _amd_err:
-                print(f"[agent] could not write AGENTS.md: {_amd_err}")
         process = spawn_cli_subprocess(cli_cmd, agent.work_dir, extra_env=agent.extra_env, pool_session=agent.pool_session)
 
         agent.pid = process.pid
@@ -1620,15 +1621,9 @@ class LocalAgentManager:
 
         print(f"[LocalAgent] Resuming session {agent.session_id} with {provider.display_name}")
 
-        # A saved agent's AGENTS.md → drop it into the workspace so the harness
-        # reads it as project instructions (cerver run --agent <slug>).
-        if getattr(agent, "agents_md", None) and agent.work_dir:
-            try:
-                os.makedirs(agent.work_dir, exist_ok=True)
-                with open(os.path.join(agent.work_dir, "AGENTS.md"), "w", encoding="utf-8") as _amd:
-                    _amd.write(agent.agents_md)
-            except OSError as _amd_err:
-                print(f"[agent] could not write AGENTS.md: {_amd_err}")
+        # No AGENTS.md drop here: the agent's instructions were injected as the
+        # system prompt on the first spawn, and the harness session retains it
+        # across --resume — so the agent persona persists into follow-up turns.
         process = spawn_cli_subprocess(cli_cmd, agent.work_dir, extra_env=agent.extra_env, pool_session=agent.pool_session)
 
         agent.process = process
