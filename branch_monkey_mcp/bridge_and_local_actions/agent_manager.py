@@ -1614,7 +1614,12 @@ class LocalAgentManager:
             return
 
         provider = self._get_provider(agent)
-        cli_cmd = build_resume_cli_command(provider, message, agent.session_id)
+        # Re-apply the saved agent's instructions as the system prompt — the
+        # harness does NOT retain it across --resume, so a follow-up would
+        # otherwise revert to the default persona (we saw Claude disavow "Jonny"
+        # on turn 2). Same source as the first spawn in _start_cli_process.
+        resume_system_prompt = agent.agents_md if getattr(agent, "agents_md", None) else None
+        cli_cmd = build_resume_cli_command(provider, message, agent.session_id, system_prompt=resume_system_prompt)
 
         if image_paths:
             print(f"[LocalAgent] Message includes {len(image_paths)} image paths for CLI to read")

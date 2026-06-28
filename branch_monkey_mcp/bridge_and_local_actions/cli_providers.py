@@ -302,8 +302,11 @@ class CliProvider:
         self,
         prompt: str,
         session_id: str,
+        system_prompt: Optional[str] = None,
     ) -> CliCommand:
-        """Build command to resume a session."""
+        """Build command to resume a session. `system_prompt`, when set, must be
+        re-applied — native session resume does NOT retain a previously-passed
+        system prompt (a saved agent's persona would be dropped on follow-ups)."""
         raise NotImplementedError
 
     def build_oneshot_command(
@@ -564,22 +567,28 @@ class ClaudeCodeProvider(CliProvider):
             env_inject=self._build_env_inject(),
         )
 
-    def build_resume_command(self, prompt, session_id):
+    def build_resume_command(self, prompt, session_id, system_prompt=None):
         """Build a ``claude --resume`` command continuing ``session_id``.
 
         Overrides :meth:`CliProvider.build_resume_command`. Resumes the
         native Claude Code session (the id captured by
         :meth:`extract_session_id`) and streams stream-json output.
+        ``system_prompt`` (a saved agent's instructions) is re-applied via
+        ``--append-system-prompt`` — Claude does NOT retain it across resume,
+        so without this the agent persona is dropped on follow-up turns.
         """
+        args = [
+            "claude",
+            "-p", prompt,
+            "--output-format", "stream-json",
+            "--verbose",
+            "--resume", session_id,
+            "--dangerously-skip-permissions",
+        ]
+        if system_prompt:
+            args.extend(["--append-system-prompt", system_prompt])
         return CliCommand(
-            args=[
-                "claude",
-                "-p", prompt,
-                "--output-format", "stream-json",
-                "--verbose",
-                "--resume", session_id,
-                "--dangerously-skip-permissions"
-            ],
+            args=args,
             env_overrides=self._build_env_overrides(),
             env_inject=self._build_env_inject(),
         )
@@ -915,7 +924,7 @@ class CodexProvider(CliProvider):
             env_finalize=self._finalize_codex_env,
         )
 
-    def build_resume_command(self, prompt, session_id):
+    def build_resume_command(self, prompt, session_id, system_prompt=None):
         """Build a ``codex exec resume <session_id>`` command.
 
         Overrides :meth:`CliProvider.build_resume_command`. Continues the
@@ -1259,7 +1268,7 @@ class GrokProvider(CliProvider):
             },
         )
 
-    def build_resume_command(self, prompt, session_id):
+    def build_resume_command(self, prompt, session_id, system_prompt=None):
         """Build a Grok "resume" — behaves like a fresh run.
 
         Overrides :meth:`CliProvider.build_resume_command`. ``xai_runner``
@@ -1429,7 +1438,7 @@ class GemmaProvider(CliProvider):
         """
         return self._gemma_command(prompt, "text", system_prompt=system_prompt)
 
-    def build_resume_command(self, prompt, session_id):
+    def build_resume_command(self, prompt, session_id, system_prompt=None):
         """Build a Gemma "resume" — behaves like a fresh run.
 
         Overrides :meth:`CliProvider.build_resume_command`. Gemini is
