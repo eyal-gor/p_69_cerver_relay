@@ -16,6 +16,7 @@ Each ``cmd_*`` function implements one argparse subcommand (wired up in
 
 import json
 import os
+import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -130,25 +131,36 @@ def cmd_llm(args):
         env.update(cli_cmd.env_inject)
 
     cwd = args.cwd or os.getcwd()
+    timeout = args.timeout or 1800
 
+    # start_new_session so a timeout kills the CLI and everything it spawned,
+    # not just the direct child — an orphaned agent keeps mutating state after
+    # the run is already marked failed.
+    proc = subprocess.Popen(
+        cli_cmd.args,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        cwd=cwd,
+        env=env,
+        start_new_session=True,
+    )
     try:
-        result = subprocess.run(
-            cli_cmd.args,
-            capture_output=True,
-            text=True,
-            timeout=args.timeout or 300,
-            cwd=cwd,
-            env=env,
-        )
-        # Print stdout (the LLM response)
-        if result.stdout:
-            print(result.stdout.rstrip())
-        if result.returncode != 0 and result.stderr:
-            print(result.stderr, file=sys.stderr)
-        sys.exit(result.returncode)
+        stdout, stderr = proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
-        print(f"Error: LLM call timed out after {args.timeout or 300}s", file=sys.stderr)
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            proc.kill()
+        proc.wait()
+        print(f"Error: LLM call timed out after {timeout}s", file=sys.stderr)
         sys.exit(1)
+    # Print stdout (the LLM response)
+    if stdout:
+        print(stdout.rstrip())
+    if proc.returncode != 0 and stderr:
+        print(stderr, file=sys.stderr)
+    sys.exit(proc.returncode)
 
 
 def _get_api_client():

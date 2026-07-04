@@ -117,7 +117,7 @@ def main():
     llm_parser.add_argument("--system-prompt", "-s", help="System prompt")
     llm_parser.add_argument("--cli", help="CLI provider: claude, codex, grok (default: from config)")
     llm_parser.add_argument("--cwd", help="Working directory")
-    llm_parser.add_argument("--timeout", type=int, default=300, help="Timeout in seconds (default: 300)")
+    llm_parser.add_argument("--timeout", type=int, default=1800, help="Timeout in seconds (default: 1800)")
     llm_parser.add_argument("--mcp", action="store_true", help="Load MCP tools (slower startup, enables tool use)")
     llm_parser.set_defaults(func=cmd_llm)
 

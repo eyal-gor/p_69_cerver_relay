@@ -42,7 +42,7 @@ def _build_default_workflow(name, goal, machine_id=None):
     steps = []
     if machine_id:
         steps.append(f'  - name: load-context\n    description: Load machine context (agent, memory, metrics, tasks)\n    run: "kompany-workflow load-context {machine_id}"')
-    steps.append(f'  - name: run\n    description: "{goal or name}"\n    run: \'kompany-workflow llm -s "$STEP_LOAD_CONTEXT_STDOUT" -p "Execute your goal: {(goal or name).replace(chr(39), "")}"\'\n    timeout: 300')
+    steps.append(f'  - name: run\n    description: "{goal or name}"\n    run: \'kompany-workflow llm -s "$STEP_LOAD_CONTEXT_STDOUT" -p "Execute your goal: {(goal or name).replace(chr(39), "")}"\'\n    timeout: 1800')
     return f'name: {safe_name}\ndescription: "{goal or name}"\n\nsteps:\n' + '\n\n'.join(steps) + '\n'
 
 

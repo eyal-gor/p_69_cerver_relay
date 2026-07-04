@@ -445,10 +445,10 @@ def _build_default_yaml(machine_id: Optional[str], instructions: str, agent_name
     if machine_id:
         steps.append(f'  - name: load-context\n    description: Load machine context (agent, memory, metrics, tasks)\n    run: "kompany-workflow load-context {machine_id}"')
         escaped = instructions.replace('"', '\\"')
-        steps.append(f'  - name: run\n    description: "{agent_name}"\n    run: \'kompany-workflow llm -s "$STEP_LOAD_CONTEXT_STDOUT" -p "{escaped}"\'\n    timeout: 300')
+        steps.append(f'  - name: run\n    description: "{agent_name}"\n    run: \'kompany-workflow llm -s "$STEP_LOAD_CONTEXT_STDOUT" -p "{escaped}"\'\n    timeout: 1800')
     else:
         escaped = instructions.replace('"', '\\"')
-        steps.append(f'  - name: run\n    description: "{agent_name}"\n    run: \'kompany-workflow llm -p "{escaped}"\'\n    timeout: 300')
+        steps.append(f'  - name: run\n    description: "{agent_name}"\n    run: \'kompany-workflow llm -p "{escaped}"\'\n    timeout: 1800')
 
     return f"name: {agent_name}\ndescription: Auto-generated workflow\n\nsteps:\n" + "\n\n".join(steps) + "\n"
 

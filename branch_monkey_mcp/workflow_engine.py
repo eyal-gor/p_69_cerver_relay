@@ -8,6 +8,7 @@ argparse wiring in :mod:`branch_monkey_mcp.workflow` build on top of this.
 """
 
 import os
+import signal
 import subprocess
 import time
 from pathlib import Path
@@ -16,7 +17,7 @@ import yaml
 
 
 DEFAULT_WORKFLOW_FILE = ".kompany/workflow.yml"
-DEFAULT_STEP_TIMEOUT = 300  # 5 minutes
+DEFAULT_STEP_TIMEOUT = 1800  # 30 minutes — LLM agent steps routinely need more than 5
 
 
 def find_workflow_file(file_path=None):
@@ -120,34 +121,45 @@ def run_step(step, global_env, working_directory, prev_results):
     start = time.time()
 
     try:
-        result = subprocess.run(
+        # start_new_session so a timeout can kill the whole process group —
+        # otherwise grandchildren (e.g. the claude CLI spawned by
+        # `kompany-workflow llm`) are orphaned and keep running after the
+        # step is already marked failed.
+        proc = subprocess.Popen(
             command,
             shell=True,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            timeout=timeout,
             cwd=cwd,
             env=env,
+            start_new_session=True,
         )
+        try:
+            stdout, stderr = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                proc.kill()
+            proc.wait()
+            duration_ms = int((time.time() - start) * 1000)
+            return {
+                "name": name,
+                "status": "timeout",
+                "exit_code": -1,
+                "stdout": "",
+                "stderr": f"Step timed out after {timeout}s",
+                "duration_ms": duration_ms,
+            }
         duration_ms = int((time.time() - start) * 1000)
 
         return {
             "name": name,
-            "status": "success" if result.returncode == 0 else "failed",
-            "exit_code": result.returncode,
-            "stdout": result.stdout[-8192:] if len(result.stdout) > 8192 else result.stdout,
-            "stderr": result.stderr[-4096:] if len(result.stderr) > 4096 else result.stderr,
-            "duration_ms": duration_ms,
-        }
-
-    except subprocess.TimeoutExpired:
-        duration_ms = int((time.time() - start) * 1000)
-        return {
-            "name": name,
-            "status": "timeout",
-            "exit_code": -1,
-            "stdout": "",
-            "stderr": f"Step timed out after {timeout}s",
+            "status": "success" if proc.returncode == 0 else "failed",
+            "exit_code": proc.returncode,
+            "stdout": stdout[-8192:] if len(stdout) > 8192 else stdout,
+            "stderr": stderr[-4096:] if len(stderr) > 4096 else stderr,
             "duration_ms": duration_ms,
         }
 
