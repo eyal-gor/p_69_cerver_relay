@@ -92,6 +92,10 @@ class LocalAgent:
     # non-zero exit, and surfaces a clear reason to the user instead of
     # a bare SIGTERM exit code.
     watchdog_killed: bool = False
+    # Inputs that arrived mid-turn (the CLI subprocess was still running).
+    # Drained into a resume as soon as the turn ends — the cerver-side UX
+    # is "type any time", so the relay must hold, not reject.
+    pending_inputs: List[Dict] = field(default_factory=list)
     # Dedup transcript pushes by content signature (role + kind + tool_id +
     # sha1(content)). Replaces the older message.id-only dedup, which let
     # `result` events through as silent duplicates of their matching
@@ -797,7 +801,12 @@ class LocalAgentManager:
             }],
         )
 
-        if agent.complete_on_exit:
+        if agent.complete_on_exit and agent.pending_inputs and agent.session_id:
+            # Input arrived while this one-shot was finishing — keep the
+            # agent alive and answer it instead of evicting the record.
+            agent.status = "paused"
+            self._drain_pending_inputs(agent)
+        elif agent.complete_on_exit:
             agent.status = "completed" if agent.exit_code == 0 else "failed"
             agent.session_id = None  # Don't keep session — allows cleanup
             print(f"[LocalAgent] One-shot agent {agent.id} {agent.status} (exit={agent.exit_code})")
@@ -863,6 +872,7 @@ class LocalAgentManager:
                     f"agent paused after exit={agent.exit_code}",
                 )
             )
+            self._drain_pending_inputs(agent)
         else:
             agent.status = "completed" if agent.exit_code == 0 else "failed"
 
@@ -1010,6 +1020,40 @@ class LocalAgentManager:
                 return None
             first_wait = False
             await asyncio.sleep(0.1)
+
+    def queue_input(self, agent_id: str, message: str, image_paths: Optional[List[str]] = None) -> bool:
+        """Hold an input that arrived while the CLI subprocess is mid-turn.
+
+        Drained by _drain_pending_inputs when the turn ends. Returns False
+        when the agent isn't in the pool (caller falls back to its normal
+        not-found handling).
+        """
+        agent = self._agents.get(agent_id)
+        if not agent:
+            return False
+        agent.pending_inputs.append({"message": message, "images": image_paths or []})
+        print(f"[LocalAgent] Queued mid-turn input for {agent.id} ({len(agent.pending_inputs)} pending)")
+        return True
+
+    def _drain_pending_inputs(self, agent: LocalAgent) -> bool:
+        """Resume the agent with everything queued during the last turn.
+
+        Returns True when a resume was scheduled (the caller should treat
+        the agent as continuing, not completed).
+        """
+        if not agent.pending_inputs or not agent.session_id:
+            return False
+        pending = agent.pending_inputs
+        agent.pending_inputs = []
+        combined = "\n\n".join(p["message"] for p in pending if p.get("message"))
+        images: List[str] = []
+        for p in pending:
+            images.extend(p.get("images") or [])
+        print(f"[LocalAgent] Draining {len(pending)} queued input(s) for {agent.id}")
+        # pre_logged: the gateway already wrote these user messages to the
+        # cerver transcript when they arrived.
+        asyncio.create_task(self.resume_session(agent.id, combined, images, pre_logged=True))
+        return True
 
     def recover_agent(
         self,
