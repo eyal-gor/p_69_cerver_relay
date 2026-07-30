@@ -669,6 +669,11 @@ async def send_input(agent_id: str, request: InputRequest):
         return {"success": True, "action": "started", "images": len(image_paths)}
 
     if agent["status"] == "running":
+        # Mid-turn: hold the message and deliver it when the turn ends —
+        # "type any time" beats a 400 the gateway can only surface as a
+        # delivery failure.
+        if agent_manager.queue_input(agent_id, message, image_paths):
+            return {"success": True, "action": "queued", "images": len(image_paths)}
         raise HTTPException(
             status_code=400,
             detail=f"Agent is running (status={agent['status']}, sid={agent.get('session_id')}). Wait for it to complete before sending another message."

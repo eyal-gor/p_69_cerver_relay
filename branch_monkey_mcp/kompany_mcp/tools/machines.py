@@ -11,6 +11,8 @@ from ..mcp_app import mcp
 def kompany_machine_list() -> str:
     """List all machines for the current project.
 
+    Each machine shows its canvas badge number (#N) — users reference
+    machines as "system #20", so keep the number with the name.
     Requires a project to be focused first using kompany_project_focus.
     """
     if not state.CURRENT_PROJECT_ID:
@@ -27,7 +29,9 @@ def kompany_machine_list() -> str:
         output = f"# Machines (Project: {state.CURRENT_PROJECT_NAME})\n\n"
         for m in machines:
             status_icon = {"active": "🟢", "paused": "⏸️", "draft": "📝"}.get(m.get("status"), "⚪")
-            output += f"{status_icon} **{m.get('name')}** (ID: `{m.get('id')}`)\n"
+            num = m.get("machine_number")
+            num_tag = f" #{num}" if num is not None else ""
+            output += f"{status_icon} **{m.get('name')}**{num_tag} (ID: `{m.get('id')}`)\n"
             if m.get("description"):
                 output += f"   {m.get('description')[:80]}...\n"
 
