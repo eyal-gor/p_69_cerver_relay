@@ -201,12 +201,16 @@ def build_resume_cli_command(
     message: str,
     session_id: str,
     system_prompt: Optional[str] = None,
+    model: Optional[str] = None,
 ):
     """Build a resume CLI command for a provider. `system_prompt` (a saved
     agent's instructions) is re-applied on resume — native session resume drops
     a previously-passed system prompt, so without this the agent persona is lost
-    on follow-up turns."""
-    return provider.build_resume_command(message, session_id, system_prompt=system_prompt)
+    on follow-up turns. `model` is re-applied for the same reason, and is what
+    lets a live session switch model between turns."""
+    return provider.build_resume_command(
+        message, session_id, system_prompt=system_prompt, model=model
+    )
 
 
 def spawn_cli_subprocess(

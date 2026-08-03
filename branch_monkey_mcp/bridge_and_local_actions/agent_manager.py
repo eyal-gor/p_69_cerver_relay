@@ -1011,6 +1011,55 @@ class LocalAgentManager:
             first_wait = False
             await asyncio.sleep(0.1)
 
+    def apply_selection(
+        self,
+        agent_id: str,
+        *,
+        cli_tool: Optional[str],
+        cli_model: Optional[str],
+    ) -> Optional[str]:
+        """Apply a harness/model change to a live agent before its next turn.
+
+        cerver re-sends `cli_tool` / `cli_model` from the session's metadata on
+        every `/input`, so a user changing the selection mid-conversation shows
+        up here as a mismatch against the agent's current record.
+
+        Returns "harness", "model", or None (nothing changed).
+
+        Model change is cheap: the native thread continues, and the new model is
+        applied on the next resume invocation.
+
+        Harness change cannot continue the native thread — the resume id belongs
+        to the CLI that minted it. We clear it, which makes the caller fall
+        through to a fresh spawn on the new harness. The cerver session id and
+        its transcript are untouched, so the conversation survives; the CLI's
+        own working state (todo list, tool history) does not. cerver seeds the
+        replacement with the conversation so far, so the new harness isn't blind.
+        """
+        agent = self._agents.get(agent_id)
+        if not agent:
+            return None
+
+        want_tool = (cli_tool or "").strip()
+        want_model = (cli_model or "").strip()
+
+        if want_tool and want_tool != agent.cli_tool:
+            print(
+                f"[LocalAgent] {agent_id}: harness {agent.cli_tool} → {want_tool} "
+                f"(dropping resume id {str(agent.session_id)[:8]}…; fresh spawn)"
+            )
+            agent.cli_tool = want_tool
+            agent.cli_model = want_model
+            agent.session_id = None
+            return "harness"
+
+        if want_model != (agent.cli_model or ""):
+            print(f"[LocalAgent] {agent_id}: model {agent.cli_model or '(default)'} → {want_model or '(default)'}")
+            agent.cli_model = want_model
+            return "model"
+
+        return None
+
     def recover_agent(
         self,
         agent_id: str,
@@ -1619,7 +1668,15 @@ class LocalAgentManager:
         # otherwise revert to the default persona (we saw Claude disavow "Jonny"
         # on turn 2). Same source as the first spawn in _start_cli_process.
         resume_system_prompt = agent.agents_md if getattr(agent, "agents_md", None) else None
-        cli_cmd = build_resume_cli_command(provider, message, agent.session_id, system_prompt=resume_system_prompt)
+        # Re-apply the model too — it's a per-invocation flag, not session
+        # state, so a resume without it reverts to the CLI's default. This is
+        # also the hook that makes a mid-conversation model change take effect
+        # on the next turn.
+        cli_cmd = build_resume_cli_command(
+            provider, message, agent.session_id,
+            system_prompt=resume_system_prompt,
+            model=(agent.cli_model or None),
+        )
 
         if image_paths:
             print(f"[LocalAgent] Message includes {len(image_paths)} image paths for CLI to read")

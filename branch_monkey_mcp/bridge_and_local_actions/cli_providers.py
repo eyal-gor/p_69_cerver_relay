@@ -303,10 +303,16 @@ class CliProvider:
         prompt: str,
         session_id: str,
         system_prompt: Optional[str] = None,
+        model: Optional[str] = None,
     ) -> CliCommand:
         """Build command to resume a session. `system_prompt`, when set, must be
         re-applied — native session resume does NOT retain a previously-passed
-        system prompt (a saved agent's persona would be dropped on follow-ups)."""
+        system prompt (a saved agent's persona would be dropped on follow-ups).
+
+        `model` is re-applied for the same reason: it is a per-invocation flag,
+        not session state, so a resume without it silently reverts to the CLI's
+        default. Passing it here is what lets a live cerver session change model
+        mid-conversation — the native thread continues, on a different model."""
         raise NotImplementedError
 
     def build_oneshot_command(
@@ -567,7 +573,7 @@ class ClaudeCodeProvider(CliProvider):
             env_inject=self._build_env_inject(),
         )
 
-    def build_resume_command(self, prompt, session_id, system_prompt=None):
+    def build_resume_command(self, prompt, session_id, system_prompt=None, model=None):
         """Build a ``claude --resume`` command continuing ``session_id``.
 
         Overrides :meth:`CliProvider.build_resume_command`. Resumes the
@@ -576,6 +582,8 @@ class ClaudeCodeProvider(CliProvider):
         ``system_prompt`` (a saved agent's instructions) is re-applied via
         ``--append-system-prompt`` — Claude does NOT retain it across resume,
         so without this the agent persona is dropped on follow-up turns.
+        ``model`` is re-applied for the same reason, and combining it with
+        ``--resume`` is what changes the model on a live conversation.
         """
         args = [
             "claude",
@@ -585,6 +593,8 @@ class ClaudeCodeProvider(CliProvider):
             "--resume", session_id,
             "--dangerously-skip-permissions",
         ]
+        if model:
+            args.extend(["--model", model])
         if system_prompt:
             args.extend(["--append-system-prompt", system_prompt])
         return CliCommand(
@@ -924,21 +934,27 @@ class CodexProvider(CliProvider):
             env_finalize=self._finalize_codex_env,
         )
 
-    def build_resume_command(self, prompt, session_id, system_prompt=None):
+    def build_resume_command(self, prompt, session_id, system_prompt=None, model=None):
         """Build a ``codex exec resume <session_id>`` command.
 
         Overrides :meth:`CliProvider.build_resume_command`. Continues the
         codex thread whose id was captured by :meth:`extract_session_id`,
-        streaming ``--json`` events.
+        streaming ``--json`` events. ``model``, when set, is applied for this
+        call only via ``-c model="<name>"`` — same one-shot override of
+        ``~/.codex/config.toml`` that :meth:`build_run_command` uses, and it
+        must sit ahead of ``exec``.
         """
-        # Codex syntax: codex exec resume <session_id> <prompt> --dangerously-bypass-approvals-and-sandbox --json
+        # Codex syntax: codex [-c model="…"] exec resume <session_id> <prompt> --dangerously-bypass-approvals-and-sandbox --json
+        args = ["codex"]
+        if model:
+            args.extend(["-c", f'model="{model}"'])
+        args.extend([
+            "exec", "resume", session_id, prompt,
+            "--dangerously-bypass-approvals-and-sandbox",
+            "--json",
+        ])
         return CliCommand(
-            args=[
-                "codex",
-                "exec", "resume", session_id, prompt,
-                "--dangerously-bypass-approvals-and-sandbox",
-                "--json",
-            ],
+            args=args,
             env_overrides=self._build_env_overrides(),
             env_inject=self.get_auth_env(),
             env_finalize=self._finalize_codex_env,
@@ -1268,7 +1284,7 @@ class GrokProvider(CliProvider):
             },
         )
 
-    def build_resume_command(self, prompt, session_id, system_prompt=None):
+    def build_resume_command(self, prompt, session_id, system_prompt=None, model=None):
         """Build a Grok "resume" — behaves like a fresh run.
 
         Overrides :meth:`CliProvider.build_resume_command`. ``xai_runner``
@@ -1285,7 +1301,7 @@ class GrokProvider(CliProvider):
         # xAI either (xAI is stateless).
         auth_env = self.get_auth_env()
         api_key = auth_env.get(self.api_key_env)
-        return self._grok_cli_command(prompt, "stream-json", auth_env, api_key)
+        return self._grok_cli_command(prompt, "stream-json", auth_env, api_key, model=model)
 
     def build_oneshot_command(self, prompt):
         """Build a single buffered (``json``) Grok run via ``xai_runner``.
@@ -1438,7 +1454,7 @@ class GemmaProvider(CliProvider):
         """
         return self._gemma_command(prompt, "text", system_prompt=system_prompt)
 
-    def build_resume_command(self, prompt, session_id, system_prompt=None):
+    def build_resume_command(self, prompt, session_id, system_prompt=None, model=None):
         """Build a Gemma "resume" — behaves like a fresh run.
 
         Overrides :meth:`CliProvider.build_resume_command`. Gemini is
@@ -1449,7 +1465,7 @@ class GemmaProvider(CliProvider):
         # Gemini is stateless w.r.t. session_id — chat-style resume is a
         # cerver-level concern (the relay re-feeds the prior transcript each
         # turn), so a resume behaves like a fresh run. Mirrors GrokProvider.
-        return self._gemma_command(prompt, "stream-json")
+        return self._gemma_command(prompt, "stream-json", model=model)
 
     def build_oneshot_command(self, prompt):
         """Build a single buffered (``json``) Gemma run via ``gemma_runner``.
@@ -1478,6 +1494,120 @@ class GemmaProvider(CliProvider):
         return text.startswith(("warn:", "Warning:", "DeprecationWarning"))
 
 
+class OllamaProvider(CliProvider):
+    """Local open-weights models, served by Ollama on this machine.
+
+    The odd one out in this file, in the way that matters most: every other
+    provider talks to a vendor account, so "is it available" is a question
+    about a key. Here the models are files on the user's disk, so
+    availability is a question about *this machine* — is the server up, and
+    which weights have been pulled. Nothing about it generalises across
+    computes, which is why :meth:`local_models` is surfaced in the relay's
+    capability payload rather than hardcoded anywhere upstream.
+
+    Runs the bundled `ollama_runner` (no vendor CLI), same as Gemma and
+    Grok, and emits claude stream-json.
+    """
+
+    name = "ollama"
+    display_name = "Ollama (local)"
+    install_hint = "install Ollama from ollama.com, then `ollama pull llama3.2`"
+    # Deliberately empty: local inference needs no key. get_auth_status
+    # reports on the server instead.
+    api_key_env = ""
+    api_key_config = ""
+
+    def local_models(self) -> List[str]:
+        """Models pulled on this machine. Empty when the server is down."""
+        from .ollama_runner import list_local_models
+
+        return list_local_models()
+
+    def is_available(self) -> Optional[str]:
+        """Available iff the local server answers *and* has a model.
+
+        Overrides :meth:`CliProvider.is_available`. Deliberately stricter
+        than "is the binary on PATH": an Ollama install with no weights
+        pulled can't run anything, and reporting it as available would put
+        a harness in the picker that fails on first use.
+        """
+        if not self.local_models():
+            return None
+        return sys.executable
+
+    def health_check(self) -> dict:
+        models = self.local_models()
+        if not models:
+            return {
+                "ok": False,
+                "path": None,
+                "detail": "no local Ollama server, or no models pulled",
+            }
+        return {
+            "ok": True,
+            "path": sys.executable,
+            "detail": f"{len(models)} local model(s): {', '.join(models[:4])}",
+        }
+
+    def get_auth_status(self) -> dict:
+        """There is no auth — local weights, local inference, no account."""
+        models = self.local_models()
+        if models:
+            return {
+                "authenticated": True,
+                "method": "none",
+                "detail": f"local — no key needed ({len(models)} model(s) pulled)",
+            }
+        return {
+            "authenticated": False,
+            "method": "none",
+            "detail": "Ollama not running, or no models pulled (`ollama pull llama3.2`)",
+        }
+
+    def _ollama_command(self, prompt, output_format, model=None, system_prompt=None):
+        """Build the shared ``ollama_runner`` invocation for every mode."""
+        args = [
+            sys.executable, "-m",
+            "branch_monkey_mcp.bridge_and_local_actions.ollama_runner",
+            "-p", prompt,
+            "--output-format", output_format,
+        ]
+        if output_format == "stream-json":
+            args.append("--verbose")
+        if model:
+            args.extend(["--model", model])
+        if system_prompt:
+            args.extend(["--append-system-prompt", system_prompt])
+        return CliCommand(args=args, env_overrides={"CLAUDECODE": None})
+
+    def build_run_command(self, prompt, system_prompt=None, model=None):
+        return self._ollama_command(prompt, "stream-json", model=model, system_prompt=system_prompt)
+
+    def build_text_command(self, prompt, system_prompt=None, use_mcp=False):
+        return self._ollama_command(prompt, "text", system_prompt=system_prompt)
+
+    def build_resume_command(self, prompt, session_id, system_prompt=None, model=None):
+        """Resume behaves like a fresh run.
+
+        Overrides :meth:`CliProvider.build_resume_command`. Ollama is
+        stateless w.r.t. ``session_id`` — continuity is a cerver-level
+        concern (the relay re-feeds the prior transcript each turn), same
+        as Grok and Gemma.
+        """
+        return self._ollama_command(prompt, "stream-json", model=model, system_prompt=system_prompt)
+
+    def build_oneshot_command(self, prompt):
+        return self._ollama_command(prompt, "json")
+
+    def extract_session_id(self, event):
+        if event.get("type") == "system" and event.get("subtype") == "init":
+            return event.get("session_id")
+        return None
+
+    def is_noise(self, text):
+        return text.startswith(("warn:", "Warning:", "DeprecationWarning"))
+
+
 # --- Provider Registry ---
 
 _PROVIDERS: Dict[str, CliProvider] = {
@@ -1485,6 +1615,7 @@ _PROVIDERS: Dict[str, CliProvider] = {
     "codex": CodexProvider(),
     "grok": GrokProvider(),
     "gemma": GemmaProvider(),
+    "ollama": OllamaProvider(),
 }
 
 # Fallback default when no persistent config exists

@@ -255,7 +255,12 @@ class ImageData(BaseModel):
 class InputRequest(BaseModel):
     input: str
     images: Optional[List[ImageData]] = None
-    cli_tool: Optional[str] = None  # Override CLI provider before first message (prepared sessions only)
+    cli_tool: Optional[str] = None  # Harness for this turn. cerver re-sends it from
+                                    # session metadata on every input, so changing it
+                                    # mid-conversation switches the agent's harness.
+    cli_model: Optional[str] = None  # Model for this turn, same deal — re-applied on
+                                     # each resume because it's a per-invocation flag,
+                                     # not something the CLI session remembers.
     # When the cerver gateway forwards a /v2/sessions/:id/input call to
     # the relay, it has ALREADY written the user message to the
     # session's transcript (step 1 of recordInput). Setting this flag
@@ -644,12 +649,27 @@ async def send_input(agent_id: str, request: InputRequest):
     # Handle prepared sessions: first message spawns the CLI process
     if agent["status"] == "prepared":
         # Allow overriding CLI tool before spawning (user may have changed selection)
-        if request.cli_tool:
-            agent_obj = agent_manager._agents.get(agent_id)
-            if agent_obj:
+        agent_obj = agent_manager._agents.get(agent_id)
+        if agent_obj:
+            if request.cli_tool:
                 agent_obj.cli_tool = request.cli_tool
+            if request.cli_model is not None:
+                agent_obj.cli_model = request.cli_model or ""
         await agent_manager.spawn_cli_process(agent_id, message, image_paths, pre_logged=request.pre_logged)
         return {"success": True, "action": "started", "cli_tool": agent.get("cli_tool"), "images": len(image_paths)}
+
+    # Mid-conversation harness/model change. cerver re-sends the selection from
+    # session metadata on every input, so a mismatch here means the user changed
+    # it since the last turn. A model change rides along on the next resume; a
+    # harness change drops the resume id, which routes us to a fresh spawn below
+    # (cerver has already seeded `message` with the conversation so far).
+    # Only between turns — a switch while the CLI is mid-answer would drop the
+    # resume id out from under the running process and spawn a second one.
+    if agent["status"] in ("paused", "completed", "failed"):
+        if agent_manager.apply_selection(
+            agent_id, cli_tool=request.cli_tool, cli_model=request.cli_model
+        ):
+            agent = agent_manager.get(agent_id)
 
     print(
         f"[send_input] agent={agent_id} status={agent.get('status')} "
