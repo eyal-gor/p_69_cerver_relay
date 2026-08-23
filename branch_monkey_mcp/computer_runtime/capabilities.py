@@ -8,11 +8,23 @@ on route handlers.
 
 from typing import Any, Dict, List
 
-from ..bridge_and_local_actions.cli_providers import get_available_providers
+from ..bridge_and_local_actions.cli_providers import (
+    _invalidate_resolver_path_cache,
+    get_available_providers,
+)
 
 
 def get_available_cli_tools() -> List[str]:
-    """Return installed CLI tool names."""
+    """Return installed CLI tool names.
+
+    Drops the cached lookup PATH first: a CLI installed after the relay
+    started — into a directory that wasn't on the PATH at startup — stayed
+    invisible until a relay restart, because detection probed against the
+    stale cached PATH. Capabilities are collected once per heartbeat
+    (every 60s), so rebuilding the PATH here is cheap and a freshly
+    installed harness shows up on the next heartbeat.
+    """
+    _invalidate_resolver_path_cache()
     tools: List[str] = []
     for name, provider in get_available_providers().items():
         if provider.get("installed") and isinstance(name, str) and name:
