@@ -510,11 +510,11 @@
 
           <!-- Worktrees Container -->
           <div class="w-full max-w-5xl">
-            <div class="card rounded-2xl p-4 border-apple-cyan/20">
+            <div class="card rounded-2xl p-4 border-apple-blue/20">
               <div class="flex items-center justify-between mb-4">
                 <div class="flex items-center gap-2">
-                  <div class="w-8 h-8 rounded-lg bg-apple-cyan/15 flex items-center justify-center">
-                    <svg class="w-4 h-4 text-apple-cyan" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <div class="w-8 h-8 rounded-lg bg-apple-blue/15 flex items-center justify-center">
+                    <svg class="w-4 h-4 text-apple-blue" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z"/>
                     </svg>
                   </div>
@@ -523,7 +523,7 @@
                     <div class="text-[10px] text-apple-secondary">Isolated environments for parallel development</div>
                   </div>
                 </div>
-                <div class="text-sm font-semibold" :class="worktrees.length > 0 ? 'text-apple-cyan' : 'text-apple-tertiary'" x-text="worktrees.length + ' active'"></div>
+                <div class="text-sm font-semibold" :class="worktrees.length > 0 ? 'text-apple-blue' : 'text-apple-tertiary'" x-text="worktrees.length + ' active'"></div>
               </div>
 
               <!-- Worktrees Grid -->
@@ -540,12 +540,12 @@
 
               <div x-show="!loadingWorktrees && worktrees.length > 0" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
                 <template x-for="wt in [...worktrees].sort((a, b) => (b.task_number || 0) - (a.task_number || 0))" :key="wt.path">
-                  <div class="bg-black/30 rounded-xl p-4 border border-white/5 hover:border-apple-cyan/30 transition-colors">
+                  <div class="bg-black/30 rounded-xl p-4 border border-white/5 hover:border-apple-blue/30 transition-colors">
                     <!-- Worktree Header -->
                     <div class="flex items-center justify-between mb-3">
                       <div class="flex items-center gap-2">
-                        <span class="w-2 h-2 rounded-full" :class="wt.merged_to_main ? 'bg-apple-green' : wt.has_changes ? 'bg-apple-orange animate-pulse' : 'bg-apple-cyan'"></span>
-                        <span class="mono text-sm font-medium cursor-pointer hover:text-apple-cyan transition-colors"
+                        <span class="w-2 h-2 rounded-full" :class="wt.merged_to_main ? 'bg-apple-green' : wt.has_changes ? 'bg-apple-orange animate-pulse' : 'bg-apple-blue'"></span>
+                        <span class="mono text-sm font-medium cursor-pointer hover:text-apple-blue transition-colors"
                               :class="wt.showFullName ? '' : 'truncate max-w-[150px]'"
                               :title="wt.path"
                               @click="wt.showFullName = !wt.showFullName"
@@ -668,7 +668,7 @@
                   <div class="text-xs text-apple-secondary mt-1">Active Agents</div>
                 </div>
                 <div>
-                  <div class="text-2xl font-bold text-apple-cyan" x-text="worktrees.filter(w => !w.merged_to_main).length"></div>
+                  <div class="text-2xl font-bold text-apple-blue" x-text="worktrees.filter(w => !w.merged_to_main).length"></div>
                   <div class="text-xs text-apple-secondary mt-1">Open Branches</div>
                 </div>
                 <div>
@@ -794,9 +794,9 @@
               <div class="flex items-center justify-between">
                 <div class="flex items-center gap-3">
                   <div class="w-9 h-9 rounded-lg flex items-center justify-center"
-                       :class="wt.merged_to_main ? 'bg-apple-green/15' : 'bg-apple-cyan/15'">
+                       :class="wt.merged_to_main ? 'bg-apple-green/15' : 'bg-apple-blue/15'">
                     <svg class="w-4.5 h-4.5"
-                         :class="wt.merged_to_main ? 'text-apple-green' : 'text-apple-cyan'"
+                         :class="wt.merged_to_main ? 'text-apple-green' : 'text-apple-blue'"
                          fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z"/>
                     </svg>
