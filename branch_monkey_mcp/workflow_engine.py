@@ -66,7 +66,18 @@ def load_workflow(file_path=None):
             raise ValueError(f"Step '{step['name']}' missing 'run' command")
 
     wf.setdefault("name", path.stem)
-    wf.setdefault("working_directory", str(path.parent.parent))  # parent of .kompany/
+    # Default working directory: only infer the project root from the file's
+    # location when the file actually lives in a `.kompany/` dir (the discovery
+    # path, where grandparent == project root). For any other file — notably a
+    # temp file the relay writes from machine.command — inferring grandparent
+    # lands in a junk dir (e.g. /var/folders/.../T's parent) and silently runs
+    # steps there, breaking every relative path. Fall back to the caller's cwd,
+    # which the relay sets to the machine's working_directory.
+    if "working_directory" not in wf:
+        if path.parent.name == ".kompany":
+            wf["working_directory"] = str(path.parent.parent)
+        else:
+            wf["working_directory"] = os.getcwd()
     wf["_file"] = str(path)
 
     return wf
