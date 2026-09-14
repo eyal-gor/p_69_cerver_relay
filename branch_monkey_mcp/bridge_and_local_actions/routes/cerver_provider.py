@@ -21,6 +21,12 @@ from ...cerver_compute.provider import (
     create_provider_session as create_provider_session_response,
     get_provider_info as build_provider_info,
 )
+from ...cerver_compute.shell_sandbox import (
+    create_shell_sandbox,
+    delete_shell_sandbox,
+    get_shell_sandbox,
+    run_in_shell_sandbox,
+)
 from ..agent_manager import agent_manager
 from .agents import get_workflow_summary
 
@@ -123,10 +129,16 @@ async def create_provider_session(request: CreateProviderSessionRequest):
     Returns:
         The created session descriptor (sandbox id and status).
     """
+    engine = (request.engine or "shell").strip().lower()
+    # A shell engine is a directory a command runs in — not an agent. Handing
+    # the command to a Claude Code session as a prompt is what left every
+    # cerver shell step "paused" with nothing run.
+    if engine == "shell":
+        return create_shell_sandbox(request.metadata or {}, request.timeout_ms)
     return await create_provider_session_response(
         agent_manager=agent_manager,
         metadata=request.metadata or {},
-        engine=request.engine or "shell",
+        engine=engine,
         timeout_ms=request.timeout_ms,
     )
 
@@ -146,6 +158,8 @@ async def run_provider_session(sandbox_id: str, request: ProviderRunRequest):
         The collected run result (output and exit status).
     """
     timeout_seconds = max(5, int(request.timeout or DEFAULT_TIMEOUT_SECONDS))
+    if get_shell_sandbox(sandbox_id):
+        return await run_in_shell_sandbox(sandbox_id, request.code, timeout_seconds, request.envs)
     return await collect_provider_run(agent_manager, sandbox_id, request.code, timeout_seconds)
 
 
@@ -164,6 +178,18 @@ async def stream_provider_session(sandbox_id: str, request: ProviderRunRequest, 
     Returns:
         A ``StreamingResponse`` emitting ``text/event-stream`` events.
     """
+    if get_shell_sandbox(sandbox_id):
+        async def _shell_events():
+            import json as _json
+            result = await run_in_shell_sandbox(
+                sandbox_id, request.code, max(5, int(request.timeout or DEFAULT_TIMEOUT_SECONDS)), request.envs
+            )
+            yield f"data: {_json.dumps({'type': 'exit', **result})}\n\n"
+        return StreamingResponse(
+            _shell_events(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "Access-Control-Allow-Origin": "*"},
+        )
     return StreamingResponse(
         provider_stream_events(agent_manager, raw_request, sandbox_id, request.code),
         media_type="text/event-stream",
@@ -189,6 +215,12 @@ async def install_in_provider_session(sandbox_id: str, request: ProviderInstallR
     Returns:
         The collected run result of the install command.
     """
+    if get_shell_sandbox(sandbox_id):
+        return await run_in_shell_sandbox(
+            sandbox_id,
+            f"npm install {request.package} || pnpm add {request.package} || yarn add {request.package} || pip install {request.package}",
+            DEFAULT_TIMEOUT_SECONDS,
+        )
     return await collect_provider_run(
         agent_manager,
         sandbox_id,
@@ -210,6 +242,9 @@ def get_provider_state(sandbox_id: str):
     Returns:
         A state dict describing the session and its workflow summary.
     """
+    shell = get_shell_sandbox(sandbox_id)
+    if shell:
+        return {"provider": "cerver_local_provider", "sandbox_id": sandbox_id, "engine": "shell", "status": "ready", "cwd": shell["working_dir"], "runs": shell["runs"]}
     return get_provider_state_response(
         agent_manager=agent_manager,
         sandbox_id=sandbox_id,
