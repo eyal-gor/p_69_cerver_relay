@@ -1086,12 +1086,20 @@ class LocalAgentManager:
         if agent_id in self._agents:
             return None  # already alive — nothing to recover
 
-        if not cli_session_id:
-            # No resume id captured server-side. Could still spawn fresh
-            # against the user's input but we'd lose conversation history
-            # entirely — caller decides whether that's acceptable.
+        if not cli_session_id and not cerver_session_id:
+            # Nothing says this id belongs to a cerver conversation at all.
             return None
 
+        # No resume id means no turn has run yet: a chat cerver opened as a
+        # shell sandbox (engine "shell" is the gateway's default) whose first
+        # message is arriving now. Registering it paused without a session id
+        # makes send_input spawn a fresh CLI with that message, which is what
+        # the first turn would have done anyway. Before this, the message was
+        # answered 404, cerver swallowed it, and the chat waited forever.
+        if not working_dir:
+            from ..cerver_compute.shell_sandbox import get_shell_sandbox
+            shell = get_shell_sandbox(agent_id)
+            working_dir = (shell or {}).get("working_dir")
         resolved_dir = working_dir or os.path.expanduser("~")
         agent = LocalAgent(
             id=agent_id,
@@ -1116,7 +1124,7 @@ class LocalAgentManager:
         self._agents[agent_id] = agent
         print(
             f"[LocalAgent] Recovered agent {agent_id} "
-            f"(cli_tool={agent.cli_tool}, cli_session_id={cli_session_id[:8]}…, dir={resolved_dir})"
+            f"(cli_tool={agent.cli_tool}, cli_session_id={(cli_session_id or 'none')[:8]}…, dir={resolved_dir})"
         )
         return {
             "id": agent_id,
@@ -1126,7 +1134,7 @@ class LocalAgentManager:
             "session_id": cli_session_id,
             "work_dir": resolved_dir,
             "type": "local",
-            "can_resume": True,
+            "can_resume": bool(cli_session_id),
         }
 
     async def _push_cli_state_to_cerver(self, agent: LocalAgent) -> None:
