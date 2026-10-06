@@ -245,6 +245,12 @@ def spawn_cli_subprocess(
     )
     return subprocess.Popen(
         cli_cmd.args,
+        # An empty input, never the relay's own. A relay started in the
+        # background has no stdin, and a CLI that inherits that closed
+        # descriptor dies before it starts — the bundled Python runners
+        # (Ollama, Gemma, Grok) with "init_sys_streams: Bad file
+        # descriptor", exit 1, in about a second.
+        stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         cwd=cwd,
