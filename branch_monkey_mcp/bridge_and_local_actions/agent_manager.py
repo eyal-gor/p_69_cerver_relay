@@ -541,6 +541,20 @@ class LocalAgentManager:
         """
         loop = asyncio.get_event_loop()
         provider = self._get_provider(agent)
+        # A chat keeps one agent across turns, so the buffer holds every
+        # earlier answer too. The final flush must read only this turn: read
+        # whole, Codex's empty result fell back to every answer so far, and
+        # each turn ended with all of them glued into one more message.
+        # The buffer is capped and drops its oldest items, so anchor on the
+        # last item from before the turn, not on a position.
+        turn_anchor = agent.output_buffer[-1] if agent.output_buffer else None
+
+        def this_turn():
+            buf = agent.output_buffer
+            for i in range(len(buf) - 1, -1, -1):
+                if buf[i] is turn_anchor:
+                    return buf[i + 1:]
+            return list(buf)
 
         async def watchdog():
             """Terminate the CLI subprocess if its stdout goes silent.
@@ -680,7 +694,7 @@ class LocalAgentManager:
         # bogus "[cli_exit] ... no assistant message" after a valid answer.
         final_flush_task = None
         try:
-            final_text = self._extract_result(agent)
+            final_text = extract_result_from_output_buffer(this_turn())
             exit_failed = bool(agent.exit_code and agent.exit_code != 0)
 
             if final_text and not exit_failed:
@@ -694,7 +708,7 @@ class LocalAgentManager:
                 # the merged stdout/stderr stream after `is_noise` filtering.
                 raw_chunks = []
                 total = 0
-                for item in reversed(agent.output_buffer):
+                for item in reversed(this_turn()):
                     if not isinstance(item, dict):
                         continue
                     # Skip events that already became structured transcript
