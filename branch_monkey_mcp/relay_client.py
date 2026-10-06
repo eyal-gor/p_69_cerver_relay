@@ -1392,7 +1392,7 @@ class RelayClient:
     async def _cerver_heartbeat_loop(self):
         """Send periodic HTTP heartbeats and re-spin the WS transport as needed.
 
-        Runs every 60s while the client is active. The heartbeat keeps the
+        Runs every 30s while the client is active. The heartbeat keeps the
         gateway's registration record fresh and refreshes the TUI's compute
         id and heartbeat timestamp. It deliberately does **not** set
         ``cerver_status="connected"`` — that is the WS transport's job — so
@@ -1414,7 +1414,9 @@ class RelayClient:
         # sessions 500'd with "no active connect channel".
         while self._running:
             try:
-                await asyncio.sleep(60)
+                # Cerver marks a computer offline after 2 minutes of
+                # silence; at 60s one slow beat crossed that line.
+                await asyncio.sleep(30)
                 client = self._ensure_cerver_client()
                 if not client:
                     continue

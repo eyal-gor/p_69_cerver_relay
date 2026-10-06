@@ -438,7 +438,7 @@ class CerverComputeClient:
             await self.ensure_authenticated()
 
         payload = await self._post_with_auth_retry(
-            "/v2/computes/register", self._build_register_payload()
+            "/v2/computes/register", await asyncio.to_thread(self._build_register_payload)
         )
 
         compute_id = payload.get("compute_id")
@@ -475,11 +475,17 @@ class CerverComputeClient:
         if not self.compute_id:
             raise RuntimeError("Cerver compute registration did not return a compute_id")
 
+        # The capability probe is blocking (each CLI's sign-in check, the
+        # Ollama model list). On the event loop it froze the whole relay —
+        # heartbeats and the connect channel too — and on a machine busy
+        # running a large local model that froze it long enough for cerver
+        # to mark the computer offline mid-reply. Run it on a thread.
+        capabilities = await asyncio.to_thread(get_runtime_capabilities)
         return await self._post_with_auth_retry(
             f"/v2/computes/{self.compute_id}/heartbeat",
             {
                 "status": status,
-                "capabilities": get_runtime_capabilities(),
+                "capabilities": capabilities,
                 "metadata": self._build_metadata(),
             },
         )

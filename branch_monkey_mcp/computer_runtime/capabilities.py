@@ -21,7 +21,7 @@ def get_available_cli_tools() -> List[str]:
     started — into a directory that wasn't on the PATH at startup — stayed
     invisible until a relay restart, because detection probed against the
     stale cached PATH. Capabilities are collected once per heartbeat
-    (every 60s), so rebuilding the PATH here is cheap and a freshly
+    (every 30s, off the event loop), so rebuilding the PATH here is cheap and a freshly
     installed harness shows up on the next heartbeat.
     """
     _invalidate_resolver_path_cache()
