@@ -70,7 +70,22 @@ async def execute_local_request(local_port: int, request: Dict[str, Any]) -> Dic
                 "status": response.status_code,
                 "body": response_body,
             }
-    except (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout) as exc:
+    except httpx.ReadTimeout:
+        # The server took the request and is still working on it — a slow
+        # run, not a stuck relay.
+        return {
+            "type": "response",
+            "id": request_id,
+            "status": 504,
+            "body": {
+                "error": (
+                    f"The run on this computer did not finish within "
+                    f"{round(request_timeout)}s. It is still slow, not stuck: "
+                    f"use a smaller model or give the step more time."
+                ),
+            },
+        }
+    except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
         # The cloud-side caller sees this string verbatim (cerver bubbles
         # it up as the session-create error), so label it clearly:
         # "All connection attempts failed" coming from httpx looks like a

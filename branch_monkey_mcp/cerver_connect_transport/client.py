@@ -268,6 +268,10 @@ class CerverConnectTransport:
             "path": payload.get("path", "/"),
             "headers": payload.get("headers", {}),
             "body": payload.get("body"),
+            # The gateway's own wait. Without it the local call fell back to
+            # 180s and cut off a step the gateway was still waiting on — a
+            # large local model can take longer than that to answer.
+            "timeout_ms": payload.get("timeout_ms"),
         }
 
         response = await execute_local_request(self.local_port, request)
