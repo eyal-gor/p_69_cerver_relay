@@ -379,6 +379,7 @@ class CliProvider:
         exit_code: int,
         duration_ms: int,
         total_usage: Optional[dict] = None,
+        timings: Optional[dict] = None,
     ) -> dict:
         """Construct the canonical session_completed event.
 
@@ -405,6 +406,11 @@ class CliProvider:
         }
         if total_usage is not None:
             event["total_usage"] = total_usage
+        if timings is not None:
+            # The turn's stopwatch on this computer, ISO UTC: input_received_at,
+            # cli_started_at, first_text_at (None when it wrote nothing),
+            # cli_exited_at. Kompany lines these up with cerver's own stamps.
+            event["timings"] = timings
         return event
 
     def extract_session_id(self, event: dict) -> Optional[str]:

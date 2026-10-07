@@ -14,7 +14,7 @@ import signal
 import subprocess
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional
 
 from fastapi import HTTPException
@@ -75,6 +75,9 @@ class LocalAgent:
     output_listeners: List[asyncio.Queue] = field(default_factory=list)
     created_at: datetime = field(default_factory=datetime.now)
     last_activity: datetime = field(default_factory=datetime.now)
+    # When the current turn's message reached this computer. The turn's
+    # stopwatch runs from here; the first turn starts at created_at.
+    turn_input_at: Optional[datetime] = None
     exit_code: Optional[int] = None
     session_id: Optional[str] = None
     callback: Optional[Dict] = None  # Cron completion callback info
@@ -511,6 +514,7 @@ class LocalAgentManager:
         # Mirror the user's first message into cerver before the CLI starts
         # producing assistant output — but only if the gateway didn't
         # already write it via recordInput (pre_logged=True case).
+        agent.turn_input_at = datetime.now(timezone.utc)
         if not pre_logged:
             self._push_user_message(agent, message)
 
@@ -548,6 +552,10 @@ class LocalAgentManager:
         # The buffer is capped and drops its oldest items, so anchor on the
         # last item from before the turn, not on a position.
         turn_anchor = agent.output_buffer[-1] if agent.output_buffer else None
+        # The turn's stopwatch, carried to cerver in session_completed: when
+        # the message arrived, when the CLI started, its first words, its exit.
+        cli_started_at = datetime.now(timezone.utc)
+        first_text_at = None
 
         def this_turn():
             buf = agent.output_buffer
@@ -650,6 +658,10 @@ class LocalAgentManager:
                 # Lets headless cron / workflow runs persist their full
                 # transcript instead of just the final output.
                 self._push_event_to_cerver(agent, event)
+                if first_text_at is None and any(
+                    e.get("kind") == "text" and e.get("content") for e in self._event_to_cerver_entries(event)
+                ):
+                    first_text_at = datetime.now(timezone.utc)
 
                 # Extract token usage from `result` events (claude) and
                 # `turn.completed` events (codex, already normalized to
@@ -789,13 +801,22 @@ class LocalAgentManager:
         # Push happens BEFORE the complete_on_exit cleanup block so the
         # agent.callback is still wired (transcript-push target lookup
         # reads from there).
-        duration_ms = int(
-            (datetime.now() - agent.created_at).total_seconds() * 1000
-        )
+        # duration_ms is THIS turn, from its message reaching this computer to
+        # the CLI's exit. It used to be the agent's whole life, so a chat's
+        # 5-second answer read "Run completed · 56m".
+        cli_exited_at = datetime.now(timezone.utc)
+        turn_input_at = agent.turn_input_at or agent.created_at.astimezone(timezone.utc)
+        duration_ms = int((cli_exited_at - turn_input_at).total_seconds() * 1000)
         session_completed_event = CliProvider.make_session_completed_event(
             exit_code=agent.exit_code if agent.exit_code is not None else 0,
             duration_ms=duration_ms,
             total_usage=getattr(agent, "usage_cumulative", None),
+            timings={
+                "input_received_at": turn_input_at.isoformat(),
+                "cli_started_at": cli_started_at.isoformat(),
+                "first_text_at": first_text_at.isoformat() if first_text_at else None,
+                "cli_exited_at": cli_exited_at.isoformat(),
+            },
         )
         await self._post_transcript_entries_now(
             agent,
@@ -1824,6 +1845,7 @@ class LocalAgentManager:
         # streaming its response, so the cerver transcript reads in order —
         # unless the gateway already wrote it (pre_logged=True), in which
         # case skip to avoid the double-entry bug.
+        agent.turn_input_at = datetime.now(timezone.utc)
         if not pre_logged:
             self._push_user_message(agent, message)
 
