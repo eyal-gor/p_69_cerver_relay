@@ -28,7 +28,10 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
 ]
 dependencies = [
-    "mcp>=1.0.0",
+    # mcp 2.x renamed FastMCP and changed its API; the Kompany server is
+    # written against 1.x. Unpinned, uvx pulled 2.x and the server died on
+    # start, so every chat run on a computer lost its Kompany tools.
+    "mcp>=1.0.0,<2",
     "requests>=2.28.0",
     "httpx>=0.24.0",
     "websockets>=13.0",
