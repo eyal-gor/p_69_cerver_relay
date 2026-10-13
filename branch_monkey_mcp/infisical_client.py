@@ -89,6 +89,20 @@ async def _login(cfg: Dict[str, str]) -> Optional[str]:
 
 
 async def _ensure_access_token(cfg: Dict[str, str]) -> Optional[str]:
+    """Return a usable Bearer token, reusing the cached one until it nears expiry.
+
+    Caches the token at module scope so concurrent spawns share a single login
+    instead of re-authenticating per fetch. The cache is reused while more than
+    30s remain before expiry; otherwise `_login` is called and the new token's
+    lifetime is recorded — ~570s for universal-auth tokens (Infisical issues
+    ~10min) and a year for `st.` service tokens, which don't expire.
+
+    Args:
+        cfg: Validated config dict from `_config`.
+
+    Returns:
+        A Bearer token string, or None if login failed.
+    """
     global _access_token, _access_token_exp
     if _access_token and time.time() < _access_token_exp - 30:
         return _access_token
@@ -101,6 +115,20 @@ async def _ensure_access_token(cfg: Dict[str, str]) -> Optional[str]:
 
 
 async def _fetch_secrets(cfg: Dict[str, str]) -> Dict[str, str]:
+    """Fetch the project's secrets from Infisical's v3 raw-secrets API.
+
+    Resolves an access token first, then GETs the configured project/env and
+    flattens the response into a plain key→value dict. Entries without a
+    `secretKey` are skipped. Best-effort: any non-200 status or transport
+    error is logged and yields an empty dict rather than raising, so a failed
+    fetch never crashes the caller.
+
+    Args:
+        cfg: Validated config dict from `_config`.
+
+    Returns:
+        Mapping of secret key to value (empty on auth failure or error).
+    """
     access = await _ensure_access_token(cfg)
     if not access:
         return {}
@@ -223,4 +251,9 @@ def _fetch_secrets_blocking(cfg: Dict[str, str]) -> Dict[str, str]:
 
 
 def is_configured() -> bool:
+    """Return True when the env holds enough to attempt an Infisical fetch.
+
+    A thin predicate over `_config` (token + project_id present) for callers
+    that want to branch on Infisical availability without pulling secrets.
+    """
     return _config() is not None
