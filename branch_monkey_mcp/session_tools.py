@@ -39,6 +39,8 @@ def _codex_overrides(session_id: str, local_port: int):
         "-c", f'mcp_servers.{SERVER_NAME}.command="{b["command"]}"',
         "-c", f'mcp_servers.{SERVER_NAME}.args={json.dumps(b["args"])}',
         "-c", f"mcp_servers.{SERVER_NAME}.env={{{env}}}",
+        # Asking another agent waits for its answer; Codex's default is 60s.
+        "-c", f"mcp_servers.{SERVER_NAME}.tool_timeout_sec=300",
     ]
 
 
