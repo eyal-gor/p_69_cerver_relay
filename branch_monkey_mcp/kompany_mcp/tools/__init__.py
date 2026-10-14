@@ -21,8 +21,10 @@ from . import deployments
 from . import decisions
 from . import crons
 from . import compute
+from . import jobs
 
 __all__ = [
+    "jobs",
     "status",
     "projects",
     "tasks",
