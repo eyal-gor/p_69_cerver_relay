@@ -83,6 +83,7 @@ class LocalAgent:
     callback: Optional[Dict] = None  # Cron completion callback info
     extra_env: Optional[Dict[str, str]] = None  # Project-scoped env vars (e.g. BUFFER_API_KEY) passed by kompany/cerver and inherited by the spawned CLI process.
     pool_session: bool = False  # True = a pooled (borrowed-machine) session → run clean-room (no host env / vault, isolated HOME) with the harness pointed at the gateway proxy. See POOLS.md.
+    tools_session: Optional[str] = None  # cerver session whose tools (Kompany's) the CLI gets through the tools bridge; set when cerver says the session has tools.
     agents_md: Optional[str] = None  # A saved agent's AGENTS.md — written into the session workspace before spawn so the harness reads it as project instructions.
     # Cron-style runs complete on exit; chat-style runs pause and wait for
     # follow-up input. Both can carry a callback (chat needs one to publish
@@ -442,6 +443,19 @@ class LocalAgentManager:
             worktree_path=worktree_path,
         )
 
+    def _add_session_tools(self, agent: LocalAgent, cli_cmd):
+        """Give the CLI the session's tools when cerver said it has some."""
+        if not getattr(agent, "tools_session", None):
+            return cli_cmd
+        from ..session_tools import with_session_tools
+        try:
+            from ..cerver_connect_transport.client import get_active_transport
+            t = get_active_transport()
+            port = t.local_port if t else 18081
+        except Exception:
+            port = 18081
+        return with_session_tools(cli_cmd, agent.cli_tool, agent.tools_session, port)
+
     def _get_provider(self, agent: LocalAgent) -> CliProvider:
         """Get the CLI provider for an agent."""
         return resolve_cli_provider(agent.cli_tool)
@@ -463,6 +477,7 @@ class LocalAgentManager:
             provider, final_prompt, system_prompt=effective_system_prompt,
             model=(agent.cli_model or None),
         )
+        cli_cmd = self._add_session_tools(agent, cli_cmd)
         process = spawn_cli_subprocess(cli_cmd, agent.work_dir, extra_env=agent.extra_env, pool_session=agent.pool_session)
 
         agent.pid = process.pid
@@ -1729,6 +1744,7 @@ class LocalAgentManager:
         # No AGENTS.md drop here: the agent's instructions were injected as the
         # system prompt on the first spawn, and the harness session retains it
         # across --resume — so the agent persona persists into follow-up turns.
+        cli_cmd = self._add_session_tools(agent, cli_cmd)
         process = spawn_cli_subprocess(cli_cmd, agent.work_dir, extra_env=agent.extra_env, pool_session=agent.pool_session)
 
         agent.process = process

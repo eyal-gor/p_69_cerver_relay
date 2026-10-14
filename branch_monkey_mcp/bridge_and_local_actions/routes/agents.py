@@ -275,6 +275,9 @@ class InputRequest(BaseModel):
     cerver_session_id: Optional[str] = None
     cli_session_id: Optional[str] = None
     working_dir: Optional[str] = None
+    # The session has tools in cerver (e.g. Kompany's chat tools): the CLI
+    # gets them through the tools bridge (session_tools.py).
+    tools_available: bool = False
 
 
 def save_images_to_temp(images: List[ImageData]) -> List[str]:
@@ -633,6 +636,10 @@ async def send_input(agent_id: str, request: InputRequest):
             agent = agent_manager.get(agent_id)
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
+    if request.tools_available and request.cerver_session_id:
+        agent_obj = agent_manager._agents.get(agent_id)
+        if agent_obj:
+            agent_obj.tools_session = request.cerver_session_id
 
     message = request.input.rstrip('\n')
 
@@ -1050,3 +1057,37 @@ def get_machine_stats():
             "disk": _get_disk_stats(home_dir or get_default_working_dir()),
         },
     }
+
+
+# The tools bridge's way to cerver (tools_bridge.py): the relay adds its own
+# credentials, so no key goes into the CLI's MCP config.
+def _cerver_target():
+    from ...cerver_connect_transport.client import get_active_transport
+    t = get_active_transport()
+    if not t or not t.cerver_url or not t.api_token:
+        raise HTTPException(status_code=503, detail="The relay is not connected to cerver")
+    return t.cerver_url.rstrip("/"), {"Authorization": f"Bearer {t.api_token}"}
+
+
+@router.get("/session-tools/{session_id}")
+async def session_tools_list(session_id: str):
+    import httpx
+    base, headers = _cerver_target()
+    async with httpx.AsyncClient(timeout=30) as client:
+        res = await client.get(f"{base}/v2/sessions/{session_id}/tools", headers=headers)
+    if not res.is_success:
+        raise HTTPException(status_code=res.status_code, detail=res.text[:300])
+    return res.json()
+
+
+@router.post("/session-tools/{session_id}/call")
+async def session_tools_call(session_id: str, request: Request):
+    import httpx
+    base, headers = _cerver_target()
+    body = await request.json()
+    async with httpx.AsyncClient(timeout=300) as client:
+        res = await client.post(f"{base}/v2/sessions/{session_id}/tools/call", headers=headers, json=body)
+    try:
+        return res.json()
+    except ValueError:
+        return {"content": res.text[:2000], "is_error": True}
