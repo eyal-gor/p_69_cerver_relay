@@ -1071,6 +1071,7 @@ class CodexProvider(CliProvider):
                         "message": {
                             "content": [{
                                 "type": "tool_use",
+                                "id": item.get("id"),
                                 "name": name,
                                 "input": item.get("arguments") or {}
                             }]
@@ -1082,7 +1083,19 @@ class CodexProvider(CliProvider):
                 error = item.get("error")
                 if error:
                     text = (error.get("message") if isinstance(error, dict) else str(error)) or text
-                return {"type": "tool_result", "content": text, "is_error": bool(error)}
+                # In Claude's shape (a user message carrying a tool_result
+                # block): that is the only tool result the transcript records.
+                return {
+                    "type": "user",
+                    "message": {
+                        "content": [{
+                            "type": "tool_result",
+                            "tool_use_id": item.get("id"),
+                            "content": text,
+                            "is_error": bool(error)
+                        }]
+                    }
+                }
 
             # File operations or other item types
             if item_type in ("file_read", "file_write", "file_edit"):
