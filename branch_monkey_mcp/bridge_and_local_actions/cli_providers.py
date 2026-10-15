@@ -1059,6 +1059,31 @@ class CodexProvider(CliProvider):
                         "content": result_text
                     }
 
+            # A tool from an MCP server (Kompany's tools through the session
+            # bridge) → tool use / tool result. Dropped before, so a Codex
+            # chat's transcript never showed its tool calls, and a proposed
+            # change (read back from its tool result) never got its Apply card.
+            if item_type == "mcp_tool_call":
+                name = f"mcp__{item.get('server', '')}__{item.get('tool', '')}"
+                if event_type == "item.started" or item.get("status") == "in_progress":
+                    return {
+                        "type": "assistant",
+                        "message": {
+                            "content": [{
+                                "type": "tool_use",
+                                "name": name,
+                                "input": item.get("arguments") or {}
+                            }]
+                        }
+                    }
+                result = item.get("result") or {}
+                parts = result.get("content") if isinstance(result, dict) else None
+                text = "\n".join(p.get("text", "") for p in (parts or []) if isinstance(p, dict) and p.get("type") == "text")
+                error = item.get("error")
+                if error:
+                    text = (error.get("message") if isinstance(error, dict) else str(error)) or text
+                return {"type": "tool_result", "content": text, "is_error": bool(error)}
+
             # File operations or other item types
             if item_type in ("file_read", "file_write", "file_edit"):
                 fname = item.get("file", item.get("path", ""))
