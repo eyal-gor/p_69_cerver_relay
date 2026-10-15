@@ -305,3 +305,22 @@ def test_codex_empty_turn_completed_falls_back_to_assistant_text():
     ]
 
     assert extract_result_from_output_buffer(output_buffer) == "real answer"
+
+
+def test_codex_turn_with_several_messages_is_not_flushed_again():
+    """Codex has no final result text, so the final flush joins every message
+    of the turn — a text the signature dedup has never seen, though each part
+    already streamed. The turn counts as pushed when every part was."""
+    mgr = LocalAgentManager.__new__(LocalAgentManager)
+    agent = MagicMock()
+    agent._pushed_signatures = set()
+    turn = [
+        {"parsed": {"type": "assistant", "message": {"content": [{"type": "text", "text": "Checking."}]}}},
+        {"parsed": {"type": "assistant", "message": {"content": [{"type": "text", "text": "0 clicks."}]}}},
+        {"parsed": {"type": "result", "result": "", "usage": {}}},
+    ]
+    assert not mgr._turn_text_already_pushed(agent, turn)
+    for text in ("Checking.", "0 clicks."):
+        agent._pushed_signatures.add(LocalAgentManager._entry_signature({"role": "assistant", "kind": "text", "content": text}))
+    assert mgr._turn_text_already_pushed(agent, turn)
+    assert extract_result_from_output_buffer(turn) == "Checking.\n\n0 clicks."

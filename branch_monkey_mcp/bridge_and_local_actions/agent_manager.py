@@ -725,10 +725,15 @@ class LocalAgentManager:
             exit_failed = bool(agent.exit_code and agent.exit_code != 0)
 
             if final_text and not exit_failed:
-                final_flush_task = self._post_transcript_entries(
-                    agent,
-                    [{"role": "assistant", "kind": "text", "content": final_text}],
-                )
+                # Codex has no final result text, so final_text is every
+                # message of the turn joined: new to the signature dedup,
+                # though each part was pushed as it streamed, and the answer
+                # showed twice. Skip it when every part already landed.
+                if not self._turn_text_already_pushed(agent, this_turn()):
+                    final_flush_task = self._post_transcript_entries(
+                        agent,
+                        [{"role": "assistant", "kind": "text", "content": final_text}],
+                    )
             else:
                 # Collect the last ~500 bytes of raw (non-structured) output
                 # — that's where stderr lines and CLI error messages live in
@@ -990,6 +995,21 @@ class LocalAgentManager:
         # but harmless because the signature dedup in _push_event_to_cerver
         # would skip it anyway.
         return entries
+
+    def _turn_text_already_pushed(self, agent: LocalAgent, turn: list) -> bool:
+        """Whether every assistant text block of the turn already went to cerver."""
+        texts = []
+        for item in turn:
+            parsed = item.get("parsed") if isinstance(item, dict) else None
+            if not isinstance(parsed, dict) or parsed.get("type") != "assistant":
+                continue
+            for block in (parsed.get("message") or {}).get("content", []) or []:
+                if isinstance(block, dict) and block.get("type") == "text" and block.get("text"):
+                    texts.append(block["text"])
+        return bool(texts) and all(
+            self._entry_signature({"role": "assistant", "kind": "text", "content": text}) in agent._pushed_signatures
+            for text in texts
+        )
 
     @staticmethod
     def _entry_signature(entry: dict) -> str:
