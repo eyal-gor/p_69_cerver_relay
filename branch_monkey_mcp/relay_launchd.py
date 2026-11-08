@@ -113,7 +113,8 @@ def install_launchd_service(home_dir: str = None, machine_name: str = None) -> b
 
     program_args = [
         uv_bin, "tool", "uvx", "--refresh",
-        "--from", "git+https://github.com/eyal-gor/p_69_cerver_relay.git",
+        # [live] adds WebRTC screen sharing (routes/live.py) on desktop relays.
+        "--from", "branch-monkey-mcp[live] @ git+https://github.com/eyal-gor/p_69_cerver_relay.git",
         "cerver-relay",
         "--cerver-only",
         "--cerver-url", "https://gateway.cerver.ai",

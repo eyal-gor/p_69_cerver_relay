@@ -41,6 +41,10 @@ dependencies = [
     "pyyaml>=6.0",
 ]
 
+[project.optional-dependencies]
+# Live screen over WebRTC (routes/live.py). Heavy (ships ffmpeg via av), so opt-in.
+live = ["aiortc>=1.9", "mss>=9.0", "numpy>=1.24"]
+
 [project.scripts]
 # Cerver-facing binaries. The relay registers your machine as a private
 # compute on cerver; add-provider walks you through wiring third-party
