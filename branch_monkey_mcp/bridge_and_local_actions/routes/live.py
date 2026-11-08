@@ -20,6 +20,8 @@ import concurrent.futures
 import fractions
 import threading
 import logging
+import os
+import sys
 import time
 import uuid
 from typing import Any, Dict, Optional
@@ -57,6 +59,61 @@ def _deps():
             status_code=501,
             detail=f"Live screen needs the 'live' extra: pip install 'cerver-relay[live]' ({e.name} missing)",
         )
+
+
+def _screen_permission() -> Optional[bool]:
+    """macOS only: whether this process may record the screen (None elsewhere)."""
+    if sys.platform != "darwin":
+        return None
+    try:
+        import ctypes
+        import ctypes.util
+
+        cg = ctypes.cdll.LoadLibrary(ctypes.util.find_library("CoreGraphics"))
+        cg.CGPreflightScreenCaptureAccess.restype = ctypes.c_bool
+        return bool(cg.CGPreflightScreenCaptureAccess())
+    except Exception:
+        return None
+
+
+def _ask_screen_permission() -> None:
+    """macOS: put this process in the Screen Recording list (shows the prompt once)."""
+    try:
+        import ctypes
+        import ctypes.util
+
+        cg = ctypes.cdll.LoadLibrary(ctypes.util.find_library("CoreGraphics"))
+        cg.CGRequestScreenCaptureAccess.restype = ctypes.c_bool
+        cg.CGRequestScreenCaptureAccess()
+    except Exception:
+        pass
+
+
+def _capability() -> Dict[str, Any]:
+    """Whether this machine can stream its screen, and if not, why.
+
+    reason: ok | missing_deps | needs_permission | no_display
+    """
+    try:
+        _deps()
+    except HTTPException as e:
+        return {"available": False, "reason": "missing_deps", "detail": e.detail}
+    if sys.platform == "darwin":
+        if _screen_permission() is False:
+            return {
+                "available": False,
+                "reason": "needs_permission",
+                "detail": "macOS needs Screen Recording allowed for this relay "
+                "(System Settings > Privacy & Security > Screen & System Audio Recording), "
+                f"then a relay restart. Process: {sys.executable}",
+            }
+    elif sys.platform.startswith("linux") and not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
+        return {
+            "available": False,
+            "reason": "no_display",
+            "detail": "This machine has no screen (no DISPLAY). Run the agent's apps on a virtual display (Xvfb) to watch them.",
+        }
+    return {"available": True, "reason": "ok"}
 
 
 def _screen_track(fps: int, monitor: int):
@@ -128,7 +185,12 @@ async def _close(peer_id: str) -> None:
 @router.post("/offer")
 async def live_offer(offer: Offer):
     """Answer a viewer's WebRTC offer with this machine's screen."""
-    _deps()
+    cap = _capability()
+    if not cap["available"]:
+        if cap["reason"] == "needs_permission":
+            _ask_screen_permission()
+        # Refuse up front: without permission a grab blocks and the viewer waits on nothing.
+        raise HTTPException(status_code=501 if cap["reason"] == "missing_deps" else 409, detail=cap)
     from aiortc import RTCConfiguration, RTCIceServer, RTCPeerConnection, RTCSessionDescription
 
     if offer.type != "offer":
@@ -172,9 +234,4 @@ async def live_close(peer_id: str):
 @router.get("/status")
 async def live_status():
     """Whether live screen is available here, and how many viewers are watching."""
-    try:
-        _deps()
-        available = True
-    except HTTPException:
-        available = False
-    return {"available": available, "viewers": len(_peers), "max_viewers": MAX_VIEWERS}
+    return {**_capability(), "platform": sys.platform, "viewers": len(_peers), "max_viewers": MAX_VIEWERS}
