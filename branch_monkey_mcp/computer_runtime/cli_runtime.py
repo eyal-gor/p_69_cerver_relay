@@ -260,6 +260,16 @@ def spawn_cli_subprocess(
         pool_session=pool_session,
         clean_home=cwd if pool_session else None,
     )
+    # Which model credentials the CLI starts with (names and shape only, never
+    # values): "Not logged in" on a cloud sandbox is otherwise invisible here.
+    base = env.get("ANTHROPIC_BASE_URL", "")
+    print(
+        f"[cli_runtime] spawn {cli_cmd.args[0] if cli_cmd.args else '?'}: "
+        f"ANTHROPIC_API_KEY={'set' if env.get('ANTHROPIC_API_KEY') else 'unset'} "
+        f"base={'proxy' if '/v2/proxy/' in base else ('other' if base else 'unset')} "
+        f"host_base={'proxy' if '/v2/proxy/' in os.environ.get('ANTHROPIC_BASE_URL', '') else 'no'} "
+        f"pool={pool_session} home={env.get('HOME', '')}"
+    )
     return subprocess.Popen(
         cli_cmd.args,
         # An empty input, never the relay's own. A relay started in the

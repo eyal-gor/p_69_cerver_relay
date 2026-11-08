@@ -1600,6 +1600,13 @@ class RelayClient:
         try:
             uvx = shutil.which("uvx") or "uvx"
             repo_url = f"git+https://github.com/{RELAY_GITHUB_REPO}.git"
+            # Keep the live-screen extra across the restart. Without it a
+            # relay that booted with [live] (every e2b desktop) came back
+            # without mss/aiortc after its first self-update, and its screen
+            # went dark with "missing_deps".
+            import importlib.util
+            if importlib.util.find_spec("mss") is not None or os.environ.get("DISPLAY"):
+                repo_url = f"branch-monkey-mcp[live] @ {repo_url}"
             # Drop the script name (sys.argv[0]) — uvx will produce a new one.
             extra_args = sys.argv[1:]
             cmd = [
