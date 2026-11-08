@@ -512,6 +512,12 @@ class ClaudeCodeProvider(CliProvider):
         if config.get(self.api_key_config):
             # User has stored an API key — don't strip, we'll inject it
             return {"CLAUDECODE": None}
+        # A cloud sandbox the gateway provisioned: its key is the sandbox's own
+        # token for the gateway's model proxy (ANTHROPIC_BASE_URL points there),
+        # and there is no Claude login to fall back to. Stripping it left
+        # Claude Code "Not logged in" on every e2b/vercel machine.
+        if "/v2/proxy/anthropic" in os.environ.get("ANTHROPIC_BASE_URL", ""):
+            return {"CLAUDECODE": None}
         return {"ANTHROPIC_API_KEY": None, "CLAUDECODE": None}
 
     def _build_env_inject(self) -> Dict[str, str]:
