@@ -52,6 +52,14 @@ _NODE_REDIRECT_VARS = (
 )
 
 
+# Set by the gateway on cloud sandboxes (sandboxes_manager modelProxyEnv).
+_PROXY_PAIR_VARS = (
+    "ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY", "OPENAI_BASE_URL", "OPENAI_API_KEY",
+    "ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL", "ANTHROPIC_SMALL_FAST_MODEL",
+)
+
+
 def _clean_room_base_env(clean_home: Optional[str]) -> dict:
     """Minimal env for a POOLED session running on a borrowed machine. Carries
     no host secrets and no inherited tokens — just enough to find and run the
@@ -138,6 +146,15 @@ def build_process_env(
         infisical_env = get_secrets_sync()
         if infisical_env:
             env.update(infisical_env)
+            # A cloud sandbox the gateway set up talks to models through the
+            # gateway proxy: base URL + the sandbox's own token travel together.
+            # A vault's vendor key layered over the token sent a real vendor key
+            # to the proxy ("Invalid or expired cerver token"). Keep the pair,
+            # and the gateway's model choice, as the sandbox was given them.
+            if "/v2/proxy/" in os.environ.get("ANTHROPIC_BASE_URL", ""):
+                for var in _PROXY_PAIR_VARS:
+                    if var in os.environ:
+                        env[var] = os.environ[var]
 
     # Second scrub pass — Infisical may carry these as named secrets
     # (one user had a stale `NPM_CONFIG_PREFIX=~/.nvm/versions/node/v20.19.0`
