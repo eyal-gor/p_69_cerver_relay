@@ -7,7 +7,10 @@ answer travel through the gateway's existing owner-only forward
 (POST /v2/computes/:id/exec → POST /api/live/offer here), so no port is opened
 on this machine. Video then flows peer to peer, with STUN to find a path.
 
-View only for now: no mouse or keyboard input is accepted.
+The viewer can also drive the machine: mouse and keyboard events come over a
+WebRTC data channel named "input" and are replayed with xdotool. Linux (X11)
+only for now — the e2b desktop and any Xvfb machine; elsewhere status reports
+control: false and the viewer stays view-only.
 
 Needs the optional ``live`` extra (aiortc, mss, numpy). Without it the routes
 answer 501 and say how to install it, and the rest of the relay is unaffected.
@@ -20,7 +23,9 @@ import concurrent.futures
 import fractions
 import threading
 import logging
+import json
 import os
+import shutil
 import sys
 import time
 import uuid
@@ -113,7 +118,129 @@ def _capability() -> Dict[str, Any]:
             "reason": "no_display",
             "detail": "This machine has no screen (no DISPLAY). Run the agent's apps on a virtual display (Xvfb) to watch them.",
         }
-    return {"available": True, "reason": "ok"}
+    return {"available": True, "reason": "ok", "control": _control_available()}
+
+
+def _control_available() -> bool:
+    """Whether a viewer's clicks and keys can be replayed here (X11 + xdotool)."""
+    return sys.platform.startswith("linux") and bool(os.environ.get("DISPLAY")) and shutil.which("xdotool") is not None
+
+
+# Keys the browser names differently from X keysyms.
+_KEYSYMS = {
+    "Enter": "Return", "Backspace": "BackSpace", "Tab": "Tab", "Escape": "Escape",
+    "Delete": "Delete", "Home": "Home", "End": "End", "PageUp": "Prior", "PageDown": "Next",
+    "ArrowLeft": "Left", "ArrowRight": "Right", "ArrowUp": "Up", "ArrowDown": "Down",
+    "Insert": "Insert", " ": "space",
+    **{f"F{i}": f"F{i}" for i in range(1, 13)},
+}
+_MODS = {"ctrl": "ctrl", "alt": "alt", "shift": "shift", "meta": "super"}
+
+
+def _xdotool_args(ev: Dict[str, Any], rect: Dict[str, int]) -> Optional[list]:
+    """One viewer event as xdotool arguments, or None to ignore it.
+
+    Events: move/down/up {x, y in 0..1, b: 1|2|3}, wheel {dy}, key {k, mods},
+    text {s}. Coordinates are fractions of the streamed monitor, so they hold
+    whatever size the viewer draws the video at.
+    """
+    t = ev.get("t")
+
+    def xy() -> list:
+        x = min(max(float(ev.get("x", 0)), 0.0), 1.0)
+        y = min(max(float(ev.get("y", 0)), 0.0), 1.0)
+        return ["mousemove", str(rect["left"] + round(x * (rect["width"] - 1))), str(rect["top"] + round(y * (rect["height"] - 1)))]
+
+    button = str(ev.get("b", 1)) if ev.get("b") in (1, 2, 3) else "1"
+    if t == "move":
+        return xy()
+    if t in ("down", "up"):
+        return xy() + ["mousedown" if t == "down" else "mouseup", button]
+    if t == "wheel":
+        dy = float(ev.get("dy", 0))
+        if not dy:
+            return None
+        return ["click", "--repeat", str(min(5, max(1, round(abs(dy) / 60) or 1))), "5" if dy > 0 else "4"]
+    if t == "text":
+        text = str(ev.get("s", ""))[:500]
+        return ["type", "--delay", "8", "--", text] if text else None
+    if t == "key":
+        k = str(ev.get("k", ""))
+        sym = _KEYSYMS.get(k) or (k if len(k) == 1 else None)
+        if not sym:
+            return None
+        mods = [_MODS[m] for m in (ev.get("mods") or []) if m in _MODS]
+        return ["key", "--", "+".join(mods + [sym])]
+    return None
+
+
+def _monitor_rect(monitor: int) -> Dict[str, int]:
+    import mss
+
+    with mss.mss() as sct:
+        mons = sct.monitors
+        m = mons[monitor] if 0 < monitor < len(mons) else mons[1]
+        return {k: int(m[k]) for k in ("left", "top", "width", "height")}
+
+
+def _attach_input(pc: Any, monitor: int) -> None:
+    """Replay the viewer's input channel on this machine, in order.
+
+    A run of mouse moves collapses to the latest one, so a slow xdotool never
+    leaves the pointer trailing behind the viewer's hand.
+    """
+    if not _control_available():
+        return
+    queue: "asyncio.Queue[Dict[str, Any]]" = asyncio.Queue(maxsize=500)
+    rect: Dict[str, int] = {}
+
+    async def _replay() -> None:
+        while True:
+            ev = await queue.get()
+            if ev is None:
+                return
+            if ev.get("t") == "move" and not queue.empty():
+                continue
+            if not rect:
+                try:
+                    rect.update(await asyncio.get_running_loop().run_in_executor(None, _monitor_rect, monitor))
+                except Exception as e:
+                    log.warning("live input: no monitor geometry: %s", e)
+                    continue
+            args = _xdotool_args(ev, rect)
+            if not args:
+                continue
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    "xdotool", *args, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL
+                )
+                await asyncio.wait_for(proc.wait(), timeout=5)
+            except Exception as e:
+                log.warning("live input: xdotool failed: %s", e)
+
+    task = asyncio.ensure_future(_replay())
+
+    @pc.on("datachannel")
+    def _on_channel(channel: Any) -> None:
+        if channel.label != "input":
+            return
+
+        @channel.on("message")
+        def _on_message(msg: Any) -> None:
+            try:
+                ev = json.loads(msg)
+            except Exception:
+                return
+            if isinstance(ev, dict):
+                try:
+                    queue.put_nowait(ev)
+                except asyncio.QueueFull:
+                    pass
+
+    @pc.on("connectionstatechange")
+    async def _stop_input() -> None:
+        if pc.connectionState in ("failed", "closed", "disconnected"):
+            task.cancel()
 
 
 def _screen_track(fps: int, monitor: int):
@@ -214,6 +341,7 @@ async def live_offer(offer: Offer):
 
     try:
         pc.addTrack(_screen_track(offer.fps, offer.monitor))
+        _attach_input(pc, offer.monitor)
         await pc.setRemoteDescription(RTCSessionDescription(sdp=offer.sdp, type="offer"))
         await pc.setLocalDescription(await pc.createAnswer())  # waits for ICE gathering
     except Exception as e:
