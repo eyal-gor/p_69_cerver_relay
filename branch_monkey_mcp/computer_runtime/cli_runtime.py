@@ -53,6 +53,17 @@ _NODE_REDIRECT_VARS = (
 
 
 # Set by the gateway on cloud sandboxes (sandboxes_manager modelProxyEnv).
+def _key_kind(key: str) -> str:
+    """A key's prefix and length, never the secret part: tells a gateway
+    sandbox key from a vendor key in logs."""
+    if not key:
+        return "none"
+    for prefix in ("ck_sandbox_", "ck_", "sk-ant-", "sk-", "eyJ"):
+        if key.startswith(prefix):
+            return f"{prefix}*len{len(key)}"
+    return f"other*len{len(key)}"
+
+
 _PROXY_PAIR_VARS = (
     "ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY", "OPENAI_BASE_URL", "OPENAI_API_KEY",
     "ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL",
@@ -268,7 +279,10 @@ def spawn_cli_subprocess(
         f"ANTHROPIC_API_KEY={'set' if env.get('ANTHROPIC_API_KEY') else 'unset'} "
         f"base={'proxy' if '/v2/proxy/' in base else ('other' if base else 'unset')} "
         f"host_base={'proxy' if '/v2/proxy/' in os.environ.get('ANTHROPIC_BASE_URL', '') else 'no'} "
-        f"pool={pool_session} home={env.get('HOME', '')}"
+        f"pool={pool_session} home={env.get('HOME', '')} "
+        f"key_kind={_key_kind(env.get('ANTHROPIC_API_KEY', ''))} "
+        f"key_is_relay_key={env.get('ANTHROPIC_API_KEY') == os.environ.get('CERVER_API_KEY')} "
+        f"host_key_kind={_key_kind(os.environ.get('ANTHROPIC_API_KEY', ''))}"
     )
     return subprocess.Popen(
         cli_cmd.args,
