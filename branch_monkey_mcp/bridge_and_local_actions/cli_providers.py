@@ -114,6 +114,13 @@ def _invalidate_resolver_path_cache() -> None:
     _resolver_path_cache = None
 
 
+# Key env var -> the base-URL var that says it is meant for the gateway proxy.
+_PROXY_BASE_FOR_KEY = {
+    "ANTHROPIC_API_KEY": "ANTHROPIC_BASE_URL",
+    "OPENAI_API_KEY": "OPENAI_BASE_URL",
+}
+
+
 @dataclass
 class CliCommand:
     """A CLI command ready to execute."""
@@ -239,6 +246,15 @@ class CliProvider:
         """
         if not self.api_key_config:
             return {}
+        # A cloud sandbox the gateway set up reaches models through the
+        # gateway proxy, and its key is the sandbox's own gateway token. A
+        # vault's real vendor key sent to that proxy gets "Invalid or expired
+        # cerver token", so the proxy's key wins over the vault here.
+        base_var = _PROXY_BASE_FOR_KEY.get(self.api_key_env)
+        if base_var and "/v2/proxy/" in os.environ.get(base_var, ""):
+            proxy_key = os.environ.get(self.api_key_env)
+            if proxy_key:
+                return {self.api_key_env: proxy_key}
         config = _load_config()
         stored_key = config.get(self.api_key_config)
         if stored_key:
