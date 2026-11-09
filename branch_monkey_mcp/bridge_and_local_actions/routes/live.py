@@ -50,6 +50,9 @@ class Offer(BaseModel):
     type: str = "offer"
     fps: int = 12
     monitor: int = 1
+    # False = view only: the viewer's input channel is ignored. The gateway's
+    # session screen API always sets it; the owner-only exec path may omit it.
+    control: bool = True
 
 
 def _deps():
@@ -341,7 +344,8 @@ async def live_offer(offer: Offer):
 
     try:
         pc.addTrack(_screen_track(offer.fps, offer.monitor))
-        _attach_input(pc, offer.monitor)
+        if offer.control:
+            _attach_input(pc, offer.monitor)
         await pc.setRemoteDescription(RTCSessionDescription(sdp=offer.sdp, type="offer"))
         await pc.setLocalDescription(await pc.createAnswer())  # waits for ICE gathering
     except Exception as e:
