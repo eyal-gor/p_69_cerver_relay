@@ -2279,6 +2279,91 @@ def _try_take_over_port(port: int, holder: Dict[str, str]) -> bool:
     return not is_port_in_use(port)
 
 
+RELAY_PID_FILE = CERVER_DIR / "relay.pid"
+
+
+def _recorded_relay_pid() -> Optional[str]:
+    """The pid this home's last relay wrote, or None."""
+    try:
+        pid = RELAY_PID_FILE.read_text().strip()
+        return pid if pid.isdigit() else None
+    except Exception:
+        return None
+
+
+def _record_relay_pid() -> None:
+    """Write our pid so a later relay in this same home can tell we are its own."""
+    try:
+        CERVER_DIR.mkdir(parents=True, exist_ok=True)
+        RELAY_PID_FILE.write_text(str(os.getpid()))
+    except Exception:
+        pass
+
+
+def _process_home(pid: str) -> Optional[str]:
+    """HOME of another process, when the OS lets us read it; None otherwise."""
+    try:
+        environ = Path(f"/proc/{pid}/environ")
+        if environ.exists():
+            for item in environ.read_bytes().split(b"\0"):
+                if item.startswith(b"HOME="):
+                    return item[5:].decode(errors="replace")
+            return None
+        ps = subprocess.run(
+            ["ps", "eww", "-o", "command=", "-p", str(pid)],
+            capture_output=True, text=True, timeout=2,
+        )
+        for token in (ps.stdout or "").split():
+            if token.startswith("HOME="):
+                return token[5:]
+    except Exception:
+        pass
+    return None
+
+
+def _is_own_relay(holder: Dict[str, str]) -> bool:
+    """Is the process holding the port a relay of this same home (a stale copy of us)?
+
+    Another account's relay on the same machine (a different HOME) is not ours,
+    even though its command line looks the same: killing it takes that person's
+    computer offline. Only a pid we recorded ourselves, or a relay running with
+    our own HOME, counts as ours.
+    """
+    if not _looks_like_relay(holder.get("command", "")):
+        return False
+    if holder.get("pid") and holder["pid"] == _recorded_relay_pid():
+        return True
+    home = _process_home(holder.get("pid", ""))
+    return home is not None and os.path.realpath(home) == os.path.realpath(str(Path.home()))
+
+
+def resolve_local_port(port: int, tries: int = 20) -> int:
+    """Pick the local server port and record our pid.
+
+    Free port: use it. Held by a stale relay of this home: use it (the
+    server reclaims it). Held by anything else, including another
+    person's relay: leave that running and use the next free port.
+    """
+    chosen = port
+    if is_port_in_use(port):
+        holder = _port_holder_info(port)
+        if not (holder and _is_own_relay(holder)):
+            who = f"pid {holder['pid']}" if holder else "another process"
+            for candidate in range(port + 1, port + 1 + tries):
+                if not is_port_in_use(candidate):
+                    chosen = candidate
+                    break
+            if chosen != port:
+                print(f"[Relay] Port {port} is used by {who} that is not this relay. Leaving it running and using port {chosen}.")
+            else:
+                print(f"[Relay] Port {port} is used by {who} and no free port nearby.")
+    _record_relay_pid()
+    # Agents this relay starts reach it through these.
+    os.environ["RELAY_LOCAL_PORT"] = str(chosen)
+    os.environ["BRANCH_MONKEY_LOCAL_PORT"] = str(chosen)
+    return chosen
+
+
 def start_server_in_background(port: int = 18081, home_dir: Optional[str] = None, working_dir: Optional[str] = None):
     """Start the local agent server in a background thread.
 
@@ -2297,7 +2382,7 @@ def start_server_in_background(port: int = 18081, home_dir: Optional[str] = None
 
     if is_port_in_use(port):
         holder = _port_holder_info(port)
-        if holder and _looks_like_relay(holder["command"]):
+        if holder and _is_own_relay(holder):
             if not _try_take_over_port(port, holder):
                 print(f"[Relay] Could not reclaim port {port} from pid {holder['pid']} — skipping local server.")
                 print(f"[Relay] Run manually if needed: lsof -ti:{port} | xargs kill -9")
@@ -2720,6 +2805,7 @@ def _run_with_tui(args, home_dir, current_project, onboarding_needed=False):
 
     # Start local server
     if not args.no_server:
+        args.port = resolve_local_port(args.port)
         start_server_in_background(
             port=args.port,
             home_dir=home_dir,
@@ -3043,6 +3129,7 @@ def main():
     # Start local agent server unless --no-server is specified
     if not args.no_server:
         print(f"\033[38;2;107;114;128mStarting local server...\033[0m")
+        args.port = resolve_local_port(args.port)
         start_server_in_background(port=args.port, home_dir=home_dir, working_dir=current_project)
         time.sleep(1)
     else:
