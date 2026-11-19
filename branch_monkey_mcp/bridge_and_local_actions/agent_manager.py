@@ -270,6 +270,16 @@ class LocalAgentManager:
             )
 
         agent_id = str(uuid.uuid4())[:8]
+        if pool_session:
+            # Someone else's session: never the owner's repos or the folder it
+            # asked for. A fresh workspace; the CLI runs inside the guest fence.
+            from ..computer_runtime import guest_fence
+            ok, why = guest_fence.fence_status()
+            if not ok:
+                raise HTTPException(status_code=409, detail=f"This machine can't run other people's sessions safely: {why}.")
+            working_dir = guest_fence.new_workspace(f"agent-{agent_id}")
+            branch = None
+            skip_branch = True
         repo_dir = working_dir or get_default_working_dir()
         work_dir = repo_dir
         target_branch = branch  # Explicit branch from caller (e.g. 'staging')

@@ -133,14 +133,18 @@ async def create_provider_session(request: CreateProviderSessionRequest):
     # A shell engine is a directory a command runs in — not an agent. Handing
     # the command to a Claude Code session as a prompt is what left every
     # cerver shell step "paused" with nothing run.
-    if engine == "shell":
-        return create_shell_sandbox(request.metadata or {}, request.timeout_ms)
-    return await create_provider_session_response(
-        agent_manager=agent_manager,
-        metadata=request.metadata or {},
-        engine=engine,
-        timeout_ms=request.timeout_ms,
-    )
+    try:
+        if engine == "shell":
+            return create_shell_sandbox(request.metadata or {}, request.timeout_ms)
+        return await create_provider_session_response(
+            agent_manager=agent_manager,
+            metadata=request.metadata or {},
+            engine=engine,
+            timeout_ms=request.timeout_ms,
+        )
+    except PermissionError as exc:
+        # Someone else's session on a machine with no guest fence: refuse.
+        raise HTTPException(status_code=409, detail=str(exc))
 
 
 @router.post("/provider/sandboxes/{sandbox_id}/run")

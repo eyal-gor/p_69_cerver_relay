@@ -169,4 +169,15 @@ def get_runtime_capabilities() -> Dict[str, Any]:
         # which common tools are installed.
         "hardware": get_hardware(),
         "tools": get_installed_tools(),
+        # Can this machine run other people's sessions behind the guest
+        # fence? The gateway sends pool sessions only to machines that say so.
+        "guest_fence": _guest_fence_ok(),
     }
+
+
+def _guest_fence_ok() -> bool:
+    try:
+        from .guest_fence import fence_status
+        return fence_status()[0]
+    except Exception:
+        return False

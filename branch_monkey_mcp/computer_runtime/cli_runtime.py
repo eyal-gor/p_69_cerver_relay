@@ -284,8 +284,14 @@ def spawn_cli_subprocess(
         f"key_is_relay_key={env.get('ANTHROPIC_API_KEY') == os.environ.get('CERVER_API_KEY')} "
         f"host_key_kind={_key_kind(os.environ.get('ANTHROPIC_API_KEY', ''))}"
     )
+    args = list(cli_cmd.args)
+    if pool_session:
+        # Someone else's agent: run the CLI inside the guest fence, so it can
+        # only reach its own workspace (cwd), never the owner's files.
+        from . import guest_fence
+        args = guest_fence.wrap(args, cwd, env.get("PATH", ""))
     return subprocess.Popen(
-        cli_cmd.args,
+        args,
         # An empty input, never the relay's own. A relay started in the
         # background has no stdin, and a CLI that inherits that closed
         # descriptor dies before it starts — the bundled Python runners
