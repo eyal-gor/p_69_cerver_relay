@@ -9,6 +9,7 @@ import asyncio
 import hashlib
 import json
 import os
+import shutil
 import select
 import signal
 import subprocess
@@ -1970,6 +1971,10 @@ class LocalAgentManager:
 
         if cleanup_worktree and agent.worktree_path and agent.repo_dir:
             remove_worktree(agent.repo_dir, agent.worktree_path)
+
+        # A guest's workspace goes with its session (only ever a cerver-pool dir).
+        if getattr(agent, "pool_session", False) and agent.work_dir and "/cerver-pool/" in agent.work_dir:
+            shutil.rmtree(agent.work_dir, ignore_errors=True)
 
         del self._agents[agent_id]
         print(f"[LocalAgent] Agent {agent_id} killed, {len(self._agents)} agents remaining")

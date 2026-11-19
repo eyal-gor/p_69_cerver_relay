@@ -313,6 +313,11 @@ def delete_provider_session(sandbox_id: str, cleanup_worktree: bool = False):
     Returns:
         The deletion result for the session.
     """
+    # A shell sandbox (a folder and nothing else) is dropped here; for a
+    # guest that also removes its workspace.
+    if get_shell_sandbox(sandbox_id):
+        delete_shell_sandbox(sandbox_id)
+        return {"success": True, "sandbox_id": sandbox_id, "remote_sandbox_id": sandbox_id, "provider": "cerver_local_provider", "status": "terminated"}
     return delete_provider_session_response(
         agent_manager,
         sandbox_id,
