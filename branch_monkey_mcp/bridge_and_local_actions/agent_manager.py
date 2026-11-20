@@ -1502,6 +1502,16 @@ class LocalAgentManager:
 
             import httpx
             agent._push_stats["pushed"] += len(entries)
+
+            # Direct recording: write to Neon ourselves when the gateway
+            # hands out a pass (cerver_compute/recorder.py); otherwise the
+            # gateway path below, unchanged.
+            from ..cerver_compute.recorder import record_direct
+            if await record_direct(target, entries):
+                agent._push_stats["direct"] = agent._push_stats.get("direct", 0) + len(entries)
+                agent._push_stats["http_2xx"] += len(entries)
+                return
+
             url = f"{target['url'].rstrip('/')}/v2/sessions/{target['session_id']}/transcript"
             agent._last_push_url = url
 
