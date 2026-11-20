@@ -6,9 +6,12 @@ The gateway signs a one-hour pass for one session (POST
 function on Neon's Data API that can only append to that session. No
 database password lives here.
 
-If the gateway has recording off (404), the pass fails, or Neon refuses,
-record_direct() returns False and the caller pushes through the gateway as
-before, so nothing is ever lost by trying.
+The pool's master records; the gateway never carries transcripts. The one
+exception is a gateway that has recording switched off (404 "off", i.e.
+before Neon is set up): record_direct() returns OFF and the caller uses the
+old gateway push. When recording is on and a write fails, it returns FAILED
+and the caller keeps the lines and retries Neon. It never falls back to the
+gateway.
 """
 
 from __future__ import annotations
@@ -17,6 +20,10 @@ import os
 import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
+
+LANDED = "landed"
+OFF = "off"        # gateway has recording switched off: use the gateway push
+FAILED = "failed"  # recording is on but this write failed: keep and retry Neon
 
 _passes: Dict[str, Dict[str, Any]] = {}
 _off_until: Dict[str, float] = {}
@@ -34,11 +41,15 @@ def _expires(p: Dict[str, Any]) -> float:
         return 0.0
 
 
+class _Off(Exception):
+    pass
+
+
 async def _pass(client: Any, target: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     gateway = str(target["url"]).rstrip("/")
     sid = target["session_id"]
     if _off_until.get(gateway, 0) > time.time():
-        return None
+        raise _Off()
     p = _passes.get(sid)
     if p and _expires(p) - 120 > time.time():
         return p
@@ -48,7 +59,7 @@ async def _pass(client: Any, target: Dict[str, Any]) -> Optional[Dict[str, Any]]
     )
     if resp.status_code == 404 and "off" in resp.text.lower():
         _off_until[gateway] = time.time() + OFF_RETRY_SECONDS  # recording off on this gateway
-        return None
+        raise _Off()
     if resp.status_code != 200:
         return None
     p = resp.json()
@@ -56,10 +67,12 @@ async def _pass(client: Any, target: Dict[str, Any]) -> Optional[Dict[str, Any]]
     return p
 
 
-async def record_direct(target: Dict[str, Any], entries: List[Dict[str, Any]]) -> bool:
-    """Append entries to the session in Neon directly. True when they landed."""
-    if os.environ.get("CERVER_DIRECT_RECORDING", "1") == "0" or not entries:
-        return False
+async def record_direct(target: Dict[str, Any], entries: List[Dict[str, Any]]) -> str:
+    """Append entries to the session in Neon directly. Returns LANDED, OFF or FAILED."""
+    if os.environ.get("CERVER_DIRECT_RECORDING", "1") == "0":
+        return OFF
+    if not entries:
+        return LANDED
     import httpx
 
     rows = [dict(e, at=e.get("at") or _now_iso()) for e in entries]
@@ -67,19 +80,21 @@ async def record_direct(target: Dict[str, Any], entries: List[Dict[str, Any]]) -
         async with httpx.AsyncClient(timeout=10) as client:
             p = await _pass(client, target)
             if not p:
-                return False
+                return FAILED
             resp = await client.post(
                 p["url"],
                 json={"p_session_id": target["session_id"], "p_entries": rows},
                 headers={"Authorization": f"Bearer {p['token']}", "Content-Type": "application/json"},
             )
             if resp.status_code < 300:
-                return True
+                return LANDED
             if resp.status_code in (401, 403):
                 _passes.pop(target["session_id"], None)  # stale pass: get a new one next time
-            return False
+            return FAILED
+    except _Off:
+        return OFF
     except Exception:
-        return False
+        return FAILED
 
 
 def forget(session_id: str) -> None:

@@ -54,19 +54,19 @@ async def main():
     t = {"url": BASE, "token": "ck_x", "session_id": "sess_1"}
     e = [{"role": "assistant", "kind": "text", "content": "hello " * 1000}]
 
-    check(await recorder.record_direct(t, e) is True, "entries land in Neon directly")
+    check(await recorder.record_direct(t, e) == recorder.LANDED, "entries land in Neon directly")
     check(state["rows"][-1][0] == "Bearer t1" and state["rows"][-1][1]["p_session_id"] == "sess_1", "sent with the session's pass")
     check(bool(state["rows"][-1][1]["p_entries"][0].get("at")), "each entry gets a time")
     await recorder.record_direct(t, e)
     check(state["passes"] == 1, "the pass is reused")
     state["neon_status"] = 401
-    check(await recorder.record_direct(t, e) is False, "a refused pass falls back to the gateway")
+    check(await recorder.record_direct(t, e) == recorder.FAILED, "a refused write is kept for retry, not sent to the gateway")
     state["neon_status"] = 200
     await recorder.record_direct(t, e)
     check(state["passes"] == 2, "a refused pass is replaced")
     recorder.forget("sess_2"); state["mode"] = "off"
     t2 = dict(t, session_id="sess_2")
-    check(await recorder.record_direct(t2, e) is False, "recording off falls back")
+    check(await recorder.record_direct(t2, e) == recorder.OFF, "recording off: use the old gateway push")
     n = state["passes"]; await recorder.record_direct(t2, e)
     check(state["passes"] == n, "recording off isn't asked again right away")
     server.should_exit = True

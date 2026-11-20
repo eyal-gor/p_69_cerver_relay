@@ -1503,14 +1503,39 @@ class LocalAgentManager:
             import httpx
             agent._push_stats["pushed"] += len(entries)
 
-            # Direct recording: write to Neon ourselves when the gateway
-            # hands out a pass (cerver_compute/recorder.py); otherwise the
-            # gateway path below, unchanged.
-            from ..cerver_compute.recorder import record_direct
-            if await record_direct(target, entries):
+            # This machine records its own sessions straight to Neon
+            # (cerver_compute/recorder.py). The gateway path below runs only
+            # while the gateway has recording switched off. When recording
+            # is on, failed lines are kept and retried against Neon, never
+            # sent through the gateway.
+            from ..cerver_compute.recorder import record_direct, LANDED, OFF
+            held = getattr(agent, "_unrecorded", [])
+            batch = held + entries
+            outcome = LANDED
+            while batch:
+                for delay in (0, 0.5, 1, 2, 4):
+                    if delay:
+                        await asyncio.sleep(delay)
+                    outcome = await record_direct(target, batch[:200])
+                    if outcome != "failed":
+                        break
+                if outcome != LANDED:
+                    break
+                batch = batch[200:]
+            if outcome == LANDED:
+                agent._unrecorded = []
                 agent._push_stats["direct"] = agent._push_stats.get("direct", 0) + len(entries)
                 agent._push_stats["http_2xx"] += len(entries)
                 return
+            if outcome != OFF:
+                # Keep them for the next push (cap so a long outage can't eat memory).
+                agent._unrecorded = batch[-2000:]
+                agent._push_stats["direct_held"] = len(agent._unrecorded)
+                agent._push_errors.append(f"direct recording failed; holding {len(agent._unrecorded)} lines")
+                agent._push_errors[:] = agent._push_errors[-5:]
+                return
+            entries = batch  # recording is off on this gateway: old push
+            agent._unrecorded = []
 
             url = f"{target['url'].rstrip('/')}/v2/sessions/{target['session_id']}/transcript"
             agent._last_push_url = url
