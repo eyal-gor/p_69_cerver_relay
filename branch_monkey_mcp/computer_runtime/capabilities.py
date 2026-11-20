@@ -172,7 +172,17 @@ def get_runtime_capabilities() -> Dict[str, Any]:
         # Can this machine run other people's sessions behind the guest
         # fence? The gateway sends pool sessions only to machines that say so.
         "guest_fence": _guest_fence_ok(),
+        "p2p": _p2p_ok(),
     }
+
+
+def _p2p_ok() -> bool:
+    """Direct mode (routes/p2p.py) needs aiortc, from the live extra."""
+    try:
+        import aiortc  # noqa: F401
+        return True
+    except ImportError:
+        return False
 
 
 def _guest_fence_ok() -> bool:
