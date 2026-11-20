@@ -1477,6 +1477,7 @@ class LocalAgentManager:
             raised back to the caller. If the target can't be resolved the
             entries are dropped and the cause is logged once per agent.
             """
+            nonlocal entries
             target = await self._resolve_cerver_target(agent)
             if target is None:
                 # Last-resort drop. Log once per agent so future runs surface
