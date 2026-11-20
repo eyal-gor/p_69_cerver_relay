@@ -103,6 +103,8 @@ async def p2p_offer(offer: P2POffer):
     if len(_peers) >= MAX_PEERS:
         raise HTTPException(status_code=429, detail=f"At most {MAX_PEERS} direct connections at once")
 
+    from ._ice import speed_up_gathering
+    speed_up_gathering()
     from aiortc import RTCConfiguration, RTCIceServer, RTCPeerConnection, RTCSessionDescription
 
     peer_id = uuid.uuid4().hex[:12]

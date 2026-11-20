@@ -59,6 +59,8 @@ def _deps():
     try:
         import mss  # noqa: F401
         import numpy  # noqa: F401
+        from ._ice import speed_up_gathering
+        speed_up_gathering()
         from aiortc import RTCConfiguration, RTCIceServer, RTCPeerConnection, RTCSessionDescription  # noqa: F401
         from aiortc.mediastreams import VideoStreamTrack  # noqa: F401
         from av import VideoFrame  # noqa: F401
