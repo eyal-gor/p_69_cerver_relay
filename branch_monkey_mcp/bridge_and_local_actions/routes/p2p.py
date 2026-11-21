@@ -30,7 +30,7 @@ import json
 import logging
 import time
 import uuid
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
@@ -154,6 +154,150 @@ async def p2p_offer(offer: P2POffer):
     try:
         await pc.setRemoteDescription(RTCSessionDescription(sdp=offer.sdp, type="offer"))
         await pc.setLocalDescription(await pc.createAnswer())  # waits for ICE gathering
+    except Exception as e:
+        await _close(peer_id)
+        raise HTTPException(status_code=400, detail=f"Could not answer the offer: {e}")
+
+    asyncio.ensure_future(_expire())
+    return {"peer_id": peer_id, "sdp": pc.localDescription.sdp, "type": pc.localDescription.type}
+
+
+# ── Forward: reach an app on this machine's port, peer to peer ──
+#
+# `cerver forward <machine> <port>` on another device makes this machine's
+# app (say a web app on port 3456) show up there at localhost. Each TCP
+# connection on that device opens one data channel named "tcp:<port>"; this
+# side connects to 127.0.0.1:<port> and passes bytes both ways. The gateway
+# only introduces the two (owner of this machine only); the bytes never pass
+# through it.
+
+FORWARD_MAX_SECONDS = 12 * 60 * 60  # a forward lasts up to 12 hours
+CHANNEL_HIGH_WATER = 1 << 20  # pause reading the app while 1 MB is unsent
+CHUNK = 16 * 1024  # SCTP messages stay small
+
+
+class ForwardOffer(BaseModel):
+    sdp: str
+    type: str = "offer"
+
+
+def forward_port(label: str) -> Optional[int]:
+    """The port a channel label asks for ("tcp:3456" → 3456), or None."""
+    if not label.startswith("tcp:"):
+        return None
+    try:
+        port = int(label[4:])
+    except ValueError:
+        return None
+    return port if 1 <= port <= 65535 else None
+
+
+def _pipe(channel: Any, port: int) -> None:
+    """One data channel ⇄ one TCP connection to 127.0.0.1:port."""
+    inbox: asyncio.Queue = asyncio.Queue()
+    state: Dict[str, Any] = {"writer": None}
+
+    def _finish() -> None:
+        w = state.get("writer")
+        if w is not None:
+            try:
+                w.close()
+            except Exception:
+                pass
+        if channel.readyState in ("connecting", "open"):
+            channel.close()
+
+    async def _app_to_peer(reader: asyncio.StreamReader) -> None:
+        while True:
+            data = await reader.read(CHUNK)
+            if not data:
+                break
+            while channel.bufferedAmount > CHANNEL_HIGH_WATER and channel.readyState == "open":
+                await asyncio.sleep(0.01)
+            if channel.readyState != "open":
+                break
+            channel.send(data)
+
+    async def _peer_to_app(writer: asyncio.StreamWriter) -> None:
+        while True:
+            data = await inbox.get()
+            if data is None:
+                break
+            writer.write(data)
+            await writer.drain()
+
+    async def _run() -> None:
+        try:
+            reader, writer = await asyncio.open_connection("127.0.0.1", port)
+        except OSError as e:
+            log.info("forward: nothing listening on %s (%s)", port, e)
+            _finish()
+            return
+        state["writer"] = writer
+        tasks = [asyncio.ensure_future(_app_to_peer(reader)), asyncio.ensure_future(_peer_to_app(writer))]
+        try:
+            await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        except Exception as e:
+            log.info("forward %s ended: %s", port, e)
+        finally:
+            for t in tasks:
+                t.cancel()
+            _finish()
+
+    @channel.on("message")
+    def _on_message(raw: Any) -> None:
+        inbox.put_nowait(raw.encode() if isinstance(raw, str) else raw)
+
+    @channel.on("close")
+    def _on_close() -> None:
+        inbox.put_nowait(None)
+
+    asyncio.ensure_future(_run())
+
+
+@router.post("/forward")
+async def p2p_forward(offer: ForwardOffer):
+    """Answer an offer whose channels each reach one local port of this machine.
+
+    Only the machine's owner gets here: the gateway checks that before it
+    passes the offer on. Guests never get port forwarding.
+    """
+    if not available():
+        raise HTTPException(status_code=501, detail="Forwarding needs the relay's live extra: pip install 'cerver-relay[live]'")
+    if offer.type != "offer":
+        raise HTTPException(status_code=400, detail="type must be 'offer'")
+    if len(_peers) >= MAX_PEERS:
+        raise HTTPException(status_code=429, detail=f"At most {MAX_PEERS} direct connections at once")
+
+    from ._ice import speed_up_gathering
+    speed_up_gathering()
+    from aiortc import RTCConfiguration, RTCIceServer, RTCPeerConnection, RTCSessionDescription
+
+    peer_id = uuid.uuid4().hex[:12]
+    pc = RTCPeerConnection(RTCConfiguration(iceServers=[RTCIceServer(urls=ICE_SERVERS)]))
+    _peers[peer_id] = pc
+
+    @pc.on("connectionstatechange")
+    async def _on_state() -> None:
+        log.info("forward %s: %s", peer_id, pc.connectionState)
+        if pc.connectionState in ("failed", "closed"):
+            await _close(peer_id)
+
+    @pc.on("datachannel")
+    def _on_channel(channel: Any) -> None:
+        port = forward_port(channel.label)
+        if port is None:
+            channel.close()
+            return
+        _pipe(channel, port)
+
+    async def _expire() -> None:
+        await asyncio.sleep(FORWARD_MAX_SECONDS)
+        await _close(peer_id)
+
+    try:
+        await pc.setRemoteDescription(RTCSessionDescription(sdp=offer.sdp, type="offer"))
+        await pc.setLocalDescription(await pc.createAnswer())
     except Exception as e:
         await _close(peer_id)
         raise HTTPException(status_code=400, detail=f"Could not answer the offer: {e}")
