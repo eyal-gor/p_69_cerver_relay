@@ -172,6 +172,8 @@ def get_runtime_capabilities() -> Dict[str, Any]:
         # Can this machine run other people's sessions behind the guest
         # fence? The gateway sends pool sessions only to machines that say so.
         "guest_fence": _guest_fence_ok(),
+        # What your own agents may touch here (agent_policy.py).
+        "agent_access": _agent_access(),
         "p2p": _p2p_ok(),
         # Port forwarding over the same direct connection (routes/p2p.py).
         "p2p_forward": _p2p_ok(),
@@ -185,6 +187,14 @@ def _p2p_ok() -> bool:
         return True
     except ImportError:
         return False
+
+
+def _agent_access() -> dict:
+    try:
+        from .agent_policy import report
+        return report()
+    except Exception as e:  # noqa: BLE001
+        return {"mode": "as_you", "blocked_folders": [], "problem": str(e)}
 
 
 def _guest_fence_ok() -> bool:

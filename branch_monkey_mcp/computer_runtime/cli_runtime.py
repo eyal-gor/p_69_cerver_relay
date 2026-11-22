@@ -290,6 +290,11 @@ def spawn_cli_subprocess(
         # only reach its own workspace (cwd), never the owner's files.
         from . import guest_fence
         args = guest_fence.wrap(args, cwd, env.get("PATH", ""))
+    else:
+        # Your own agent: this computer's security rules (agent_policy.py),
+        # set on the Security page of the Cerver app. No rules, no change.
+        from . import agent_policy
+        args = agent_policy.wrap(args, cwd, env.get("PATH", ""))
     return subprocess.Popen(
         args,
         # An empty input, never the relay's own. A relay started in the
