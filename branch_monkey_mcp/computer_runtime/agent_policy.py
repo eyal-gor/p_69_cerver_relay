@@ -38,7 +38,10 @@ MODES = ("as_you", "own_folder", "vm")
 
 # The agents' own settings and logins: they must stay readable (and writable:
 # sessions, history) in own_folder mode or the agent can't start.
-_AGENT_HOME_ITEMS = (".claude", ".claude.json", ".codex", ".config/claude", ".config/codex", ".gemini", ".grok", ".cache", ".npm", ".local/state")
+_AGENT_HOME_ITEMS = (".claude", ".claude.json", ".codex", ".config/claude", ".config/codex", ".gemini", ".grok", ".cache", ".npm", ".local/state",
+                    # Cerver's own programs and the local VM's data, so an agent can
+                    # set up and check the VM (Provisioning → "Set up with an agent").
+                    ".cerver/bin", "Library/Application Support/com.apple.container")
 
 
 def load() -> Dict[str, object]:
