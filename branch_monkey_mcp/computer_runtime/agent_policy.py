@@ -16,6 +16,8 @@ The owner sets it in the Cerver app (Security page); it lives in
   start_folder  where an agent starts when the request names no folder
               (Ask Compute Pool, `cerver run`); default ~/.cerver/work/ask
               in own_folder mode, the relay's folder otherwise.
+  ask_folders  an agent may open these only after the owner says yes, on this
+              computer, for that one task (a dialog; no answer in 2 minutes = no).
   allowed_folders  own_folder mode: folders agents may also open, besides the
               one they work in (e.g. ~/Code). Blocked folders still win.
 
@@ -38,6 +40,10 @@ from typing import Dict, List, Optional
 
 from . import guest_fence
 
+# The rules live in a file only an admin can change, so an agent running as
+# you can't loosen them (`cerver access …` asks for the Mac's password).
+# Before the first change the older per-user file is read.
+RULES_FILE = "/Library/Application Support/Cerver/agent-rules.json"
 POLICY_FILE = os.path.expanduser("~/.cerver/security.json")
 MODES = ("as_you", "own_folder", "vm")
 
@@ -53,14 +59,16 @@ def load() -> Dict[str, object]:
     """The saved policy, with defaults. A broken file means the strict reading
     of what is there is impossible, so it falls back to as_you with no blocked
     folders, and says so in ``problem``."""
-    out: Dict[str, object] = {"agent_access": "as_you", "blocked_folders": [], "allowed_folders": []}
-    if not os.path.exists(POLICY_FILE):
+    out: Dict[str, object] = {"agent_access": "as_you", "blocked_folders": [], "allowed_folders": [], "ask_folders": []}
+    path = RULES_FILE if os.path.exists(RULES_FILE) else POLICY_FILE
+    if not os.path.exists(path):
         return out
+    out["guarded"] = path == RULES_FILE
     try:
-        with open(POLICY_FILE) as f:
+        with open(path) as f:
             raw = json.load(f)
     except Exception as e:  # noqa: BLE001
-        out["problem"] = f"can't read {POLICY_FILE}: {e}"
+        out["problem"] = f"can't read {path}: {e}"
         return out
     mode = raw.get("agent_access")
     if mode in MODES:
@@ -71,9 +79,10 @@ def load() -> Dict[str, object]:
     sf = raw.get("start_folder")
     if isinstance(sf, str) and sf.strip() and os.path.isdir(os.path.expanduser(sf)):
         out["start_folder"] = sf
-    allowed = raw.get("allowed_folders")
-    if isinstance(allowed, list):
-        out["allowed_folders"] = [str(b) for b in allowed if isinstance(b, str) and b.strip()]
+    for key in ("allowed_folders", "ask_folders"):
+        v = raw.get(key)
+        if isinstance(v, list):
+            out[key] = [str(b) for b in v if isinstance(b, str) and b.strip()]
     return out
 
 
@@ -94,6 +103,8 @@ def report() -> Dict[str, object]:
         "mode": p["agent_access"],
         "blocked_folders": p["blocked_folders"],
         "allowed_folders": p.get("allowed_folders", []),
+        "ask_folders": p.get("ask_folders", []),
+        "guarded": bool(p.get("guarded")),
         "ask_folder": os.path.join(WORK_ROOT, "ask"),
         # Where an agent starts when the request names no folder (Ask Compute
         # Pool, `cerver run`), after this computer's rules.
@@ -116,7 +127,58 @@ def _start_folder(p: Dict[str, object]) -> str:
 
 def active(policy: Optional[Dict[str, object]] = None) -> bool:
     p = policy or load()
-    return p["agent_access"] != "as_you" or bool(p["blocked_folders"])
+    return p["agent_access"] != "as_you" or bool(p["blocked_folders"]) or bool(p.get("ask_folders"))
+
+
+def _inside(path: str, folder: str) -> bool:
+    return path == folder or path.startswith(folder.rstrip("/") + "/")
+
+
+def _mentions(text: str, folder: str) -> bool:
+    """Does the task name this folder (full path or ~/ form)?"""
+    home = os.path.realpath(os.path.expanduser("~"))
+    forms = {folder}
+    if folder.startswith(home):
+        forms.add("~" + folder[len(home):])
+    return any(f in text for f in forms)
+
+
+def ask_owner(folder: str, task: str, timeout: int = 120) -> bool:
+    """A dialog on this computer: may this task open the folder? No answer = no."""
+    import subprocess
+    if platform.system() != "Darwin":
+        return False
+    home = os.path.realpath(os.path.expanduser("~"))
+    shown = "~" + folder[len(home):] if folder.startswith(home) else folder
+    msg = f"An agent task wants to open {shown}.\n\n{task[:300]}"
+    msg = msg.replace("\\", "\\\\").replace('"', '\\"')
+    script = (f'display dialog "{msg}" with title "Cerver" buttons {{"Don\'t allow", "Allow once"}} '
+              f'default button "Don\'t allow" giving up after {timeout} with icon caution')
+    try:
+        out = subprocess.run(["/usr/bin/osascript", "-e", script], capture_output=True, text=True, timeout=timeout + 10)
+        return "button returned:Allow once" in out.stdout and "gave up:true" not in out.stdout
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def resolve_asks(cwd: str, task_text: str, policy: Dict[str, object]) -> Dict[str, object]:
+    """Ask the owner about each "ask first" folder this task needs (its folder,
+    or one it names). Returns the policy for this one task: approved folders
+    allowed, the rest closed. A task whose own folder is refused doesn't start."""
+    p = dict(policy)
+    approved, closed = [], []
+    c = os.path.realpath(cwd)
+    for a in policy.get("ask_folders", []):  # type: ignore[union-attr]
+        r = _real(a)
+        if (_inside(c, r) or _mentions(task_text, r)) and ask_owner(r, task_text):
+            approved.append(a)
+        else:
+            closed.append(a)
+            if _inside(c, r):
+                raise PermissionError(f"The owner didn't allow agents into {a} for this task.")
+    p["allowed_folders"] = list(policy.get("allowed_folders", [])) + approved  # type: ignore[arg-type]
+    p["closed_folders"] = closed
+    return p
 
 
 def _sb(s: str) -> str:
@@ -145,7 +207,7 @@ def seatbelt_profile(cwd: str, path_value: str, policy: Dict[str, object]) -> st
         lines.append(f"(allow file-read* (subpath {_sb(os.path.join(home, 'Library/Keychains'))}))")
         for d in guest_fence._tool_read_dirs(path_value):
             lines.append(f"(allow file-read* (subpath {_sb(d)}))")
-    for b in blocked_paths(policy):
+    for b in [_real(x) for x in policy.get("closed_folders", [])] + blocked_paths(policy):  # type: ignore[operator]
         lines.append(f"(deny file-read* file-write* (subpath {_sb(b)}))")
     return "\n".join(lines) + "\n"
 
@@ -169,7 +231,7 @@ def bwrap_args(cwd: str, path_value: str, policy: Dict[str, object]) -> List[str
             r = _real(a)
             if os.path.isdir(r):
                 args += ["--bind", r, r]
-    for b in blocked_paths(policy):
+    for b in [_real(x) for x in policy.get("closed_folders", [])] + blocked_paths(policy):  # type: ignore[operator]
         if os.path.isdir(b):
             args += ["--tmpfs", b]
         elif os.path.exists(b):
@@ -216,6 +278,8 @@ def wrap(argv: List[str], cwd: str, path_value: str, workspace: Optional[str] = 
     if not active(policy):
         return argv
     check_cwd(cwd, policy)
+    if policy.get("ask_folders"):
+        policy = resolve_asks(cwd, " ".join(argv), policy)
     if policy["agent_access"] == "vm":
         from . import vm_runtime
         return vm_runtime.wrap(argv, cwd, env or {})
