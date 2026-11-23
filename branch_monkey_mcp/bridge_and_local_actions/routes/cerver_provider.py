@@ -28,6 +28,7 @@ from ...cerver_compute.shell_sandbox import (
     run_in_shell_sandbox,
 )
 from ..agent_manager import agent_manager
+from ...cerver_compute import jobs as job_log
 from .agents import get_workflow_summary
 
 router = APIRouter()
@@ -135,13 +136,18 @@ async def create_provider_session(request: CreateProviderSessionRequest):
     # cerver shell step "paused" with nothing run.
     try:
         if engine == "shell":
-            return create_shell_sandbox(request.metadata or {}, request.timeout_ms)
-        return await create_provider_session_response(
-            agent_manager=agent_manager,
-            metadata=request.metadata or {},
-            engine=engine,
-            timeout_ms=request.timeout_ms,
-        )
+            out = create_shell_sandbox(request.metadata or {}, request.timeout_ms)
+        else:
+            out = await create_provider_session_response(
+                agent_manager=agent_manager,
+                metadata=request.metadata or {},
+                engine=engine,
+                timeout_ms=request.timeout_ms,
+            )
+        sid = (out or {}).get("sandbox_id") or (out or {}).get("sandboxId") or (out or {}).get("id") if isinstance(out, dict) else None
+        if sid:
+            job_log.note_session(str(sid), engine, request.metadata)
+        return out
     except PermissionError as exc:
         # Someone else's session on a machine with no guest fence: refuse.
         raise HTTPException(status_code=409, detail=str(exc))
@@ -162,9 +168,20 @@ async def run_provider_session(sandbox_id: str, request: ProviderRunRequest):
         The collected run result (output and exit status).
     """
     timeout_seconds = max(5, int(request.timeout or DEFAULT_TIMEOUT_SECONDS))
-    if get_shell_sandbox(sandbox_id):
-        return await run_in_shell_sandbox(sandbox_id, request.code, timeout_seconds, request.envs)
-    return await collect_provider_run(agent_manager, sandbox_id, request.code, timeout_seconds)
+    jid = job_log.start(sandbox_id, request.code)
+    ok, err = False, ""
+    try:
+        if get_shell_sandbox(sandbox_id):
+            out = await run_in_shell_sandbox(sandbox_id, request.code, timeout_seconds, request.envs)
+        else:
+            out = await collect_provider_run(agent_manager, sandbox_id, request.code, timeout_seconds)
+        ok = not (isinstance(out, dict) and (out.get("error") or out.get("exit_code") not in (None, 0)))
+        return out
+    except Exception as e:  # noqa: BLE001
+        err = str(e)
+        raise
+    finally:
+        job_log.end(jid, ok, err)
 
 
 @router.post("/provider/sandboxes/{sandbox_id}/run/stream")
@@ -194,8 +211,22 @@ async def stream_provider_session(sandbox_id: str, request: ProviderRunRequest, 
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "Access-Control-Allow-Origin": "*"},
         )
+    async def _logged():
+        jid = job_log.start(sandbox_id, request.code)
+        ok = True
+        try:
+            async for ev in provider_stream_events(agent_manager, raw_request, sandbox_id, request.code):
+                if isinstance(ev, str) and '"type": "error"' in ev:
+                    ok = False
+                yield ev
+        except Exception:  # noqa: BLE001
+            ok = False
+            raise
+        finally:
+            job_log.end(jid, ok)
+
     return StreamingResponse(
-        provider_stream_events(agent_manager, raw_request, sandbox_id, request.code),
+        _logged(),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -203,6 +234,12 @@ async def stream_provider_session(sandbox_id: str, request: ProviderRunRequest, 
             "Access-Control-Allow-Origin": "*",
         },
     )
+
+
+@router.get("/jobs")
+def recent_jobs(n: int = 50):
+    """The jobs this computer ran for Cerver (for the app's Agents page)."""
+    return job_log.recent(max(1, min(n, 300)))
 
 
 @router.post("/provider/sandboxes/{sandbox_id}/install")
