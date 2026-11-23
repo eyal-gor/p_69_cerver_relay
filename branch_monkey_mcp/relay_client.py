@@ -1849,6 +1849,12 @@ class RelayClient:
                         "free_bytes": free_bytes,
                         "percent": round((used_bytes / total_bytes) * 100, 1) if total_bytes else 0.0,
                     }
+            elif _sys.platform == "win32":
+                from .computer_runtime import win_stats
+                memory_stats = win_stats.memory() or {}
+                cpu = win_stats.cpu_percent()
+                if cpu is not None:
+                    normalized = cpu  # Windows has no load average; use real CPU use
             elif _sys.platform.startswith("linux"):
                 with open("/proc/meminfo") as f:
                     fields: Dict[str, int] = {}

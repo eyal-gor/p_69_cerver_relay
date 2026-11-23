@@ -894,6 +894,9 @@ def get_machine_stats():
         clamped to the range ``[0.0, 999.0]``. Returns ``None`` if ``ps``
         produced no usable output.
         """
+        if sys.platform == "win32":
+            from ...computer_runtime import win_stats
+            return win_stats.cpu_percent()
         output = _safe_run(["ps", "-A", "-o", "%cpu="])
         if not output:
             return None
@@ -922,6 +925,10 @@ def get_machine_stats():
         total_bytes = None
         used_bytes = None
         system = sys.platform
+        if system == "win32":
+            from ...computer_runtime import win_stats
+            m = win_stats.memory() or {}
+            return {"total_bytes": m.get("total_bytes"), "used_bytes": m.get("used_bytes"), "percent": m.get("percent")}
 
         if system == "darwin":
             total_raw = _safe_run(["sysctl", "-n", "hw.memsize"])

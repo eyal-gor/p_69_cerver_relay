@@ -15,6 +15,8 @@ jobs:
         with:
           fetch-depth: 0
       - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: false
       - name: Start the relay and check it answers
         shell: pwsh
         env:
@@ -36,6 +38,7 @@ jobs:
               Write-Host "jobs: $($j | ConvertTo-Json -Compress)"
               $s = Invoke-RestMethod http://127.0.0.1:18081/api/local-claude/stats -TimeoutSec 5
               Write-Host "stats: $($s | ConvertTo-Json -Compress -Depth 4)"
+              if ($null -eq $s.compute.memory.percent -or $null -eq $s.compute.cpu_percent) { throw "no CPU or memory numbers" }
               $ok = $true; break
             } catch { if ($p.HasExited) { break } }
           }
