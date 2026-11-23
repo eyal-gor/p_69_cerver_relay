@@ -1,0 +1,45 @@
+# The relay on Windows: start it the way the Cerver app for Windows does
+# (uvx, --cerver-only --no-tui) and check its local server answers.
+name: windows
+on:
+  push:
+    branches: [main]
+    paths: ["branch_monkey_mcp/**", "pyproject.toml", ".github/workflows/windows.yml"]
+  workflow_dispatch:
+jobs:
+  smoke:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@v5
+      - name: Start the relay and check it answers
+        shell: pwsh
+        env:
+          CERVER_SKIP_CLI_PROVISION: "1"
+          PYTHONIOENCODING: utf-8
+        run: |
+          New-Item -ItemType Directory -Force "$HOME\.cerver" | Out-Null
+          "CERVER_API_KEY=cerver_test_not_real`nCERVER_GATEWAY_URL=https://gateway.cerver.ai" | Set-Content "$HOME\.cerver\cerver.env"
+          $log = "$env:RUNNER_TEMP\relay.log"
+          $p = Start-Process -FilePath uvx -ArgumentList @("--from", ".", "cerver-relay", "--cerver-only", "--no-tui", "--cerver-url", "https://gateway.cerver.ai", "--name", "win-smoke") `
+               -RedirectStandardOutput $log -RedirectStandardError "$log.err" -PassThru -NoNewWindow
+          $ok = $false
+          for ($i = 0; $i -lt 90; $i++) {
+            Start-Sleep 2
+            try {
+              $h = Invoke-RestMethod http://127.0.0.1:18081/health -TimeoutSec 3
+              Write-Host "health: $($h | ConvertTo-Json -Compress)"
+              $j = Invoke-RestMethod "http://127.0.0.1:18081/api/cerver/jobs?n=5" -TimeoutSec 3
+              Write-Host "jobs: $($j | ConvertTo-Json -Compress)"
+              $s = Invoke-RestMethod http://127.0.0.1:18081/api/local-claude/stats -TimeoutSec 5
+              Write-Host "stats: $($s | ConvertTo-Json -Compress -Depth 4)"
+              $ok = $true; break
+            } catch { if ($p.HasExited) { break } }
+          }
+          Write-Host "---- relay stdout ----"; Get-Content $log -ErrorAction SilentlyContinue | Select-Object -Last 80
+          Write-Host "---- relay stderr ----"; Get-Content "$log.err" -ErrorAction SilentlyContinue | Select-Object -Last 80
+          if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force }
+          if (-not $ok) { throw "the relay's local server never answered" }
