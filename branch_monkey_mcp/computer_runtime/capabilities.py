@@ -174,6 +174,8 @@ def get_runtime_capabilities() -> Dict[str, Any]:
         "guest_fence": _guest_fence_ok(),
         # What your own agents may touch here (agent_policy.py).
         "agent_access": _agent_access(),
+        # What's provisioned here (each computer's Provisioning section).
+        "provisioning": _provisioning(),
         "p2p": _p2p_ok(),
         # Port forwarding over the same direct connection (routes/p2p.py).
         "p2p_forward": _p2p_ok(),
@@ -187,6 +189,14 @@ def _p2p_ok() -> bool:
         return True
     except ImportError:
         return False
+
+
+def _provisioning() -> dict:
+    try:
+        from .vm_runtime import status
+        return {"vm": status()}
+    except Exception as e:  # noqa: BLE001
+        return {"vm": {"supported": False, "why": str(e)}}
 
 
 def _agent_access() -> dict:

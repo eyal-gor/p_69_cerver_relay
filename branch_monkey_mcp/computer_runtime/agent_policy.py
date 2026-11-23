@@ -10,6 +10,8 @@ The owner sets it in the Cerver app (Security page); it lives in
   as_you      today's behaviour: the agent works as you, everywhere you can.
   own_folder  the agent sees only the folder it was started in (plus its own
               settings and tools); the rest of your home folder is hidden.
+  vm          the agent runs in a fresh Linux VM (Apple's container tool,
+              provisioned with `cerver vm`) that sees only its folder.
   blocked_folders  never readable or writable by any agent, in either mode.
 
 Enforced with the system sandbox, the same one the guest fence uses
@@ -32,7 +34,7 @@ from typing import Dict, List, Optional
 from . import guest_fence
 
 POLICY_FILE = os.path.expanduser("~/.cerver/security.json")
-MODES = ("as_you", "own_folder")
+MODES = ("as_you", "own_folder", "vm")
 
 # The agents' own settings and logins: they must stay readable (and writable:
 # sessions, history) in own_folder mode or the agent can't start.
@@ -142,27 +144,44 @@ def bwrap_args(cwd: str, path_value: str, policy: Dict[str, object]) -> List[str
 
 
 def check_cwd(cwd: str, policy: Dict[str, object]) -> None:
-    """Refuse a start that would defeat the rule: the work folder is blocked,
-    or (own_folder) is the whole home folder."""
+    """Refuse a start in a blocked folder."""
     c = os.path.realpath(cwd)
     for b in blocked_paths(policy):
         if c == b or c.startswith(b.rstrip("/") + "/"):
             raise PermissionError(f"Agents can't work in {cwd}: it's a blocked folder on this computer.")
-    if policy["agent_access"] == "own_folder":
-        home = os.path.realpath(os.path.expanduser("~"))
-        if c == home or c in ("/", "/Users", "/home"):
-            raise PermissionError(
-                "This computer only lets agents into their own folder, and this one was asked to work in your whole home folder. Start it in a project folder."
-            )
 
 
-def wrap(argv: List[str], cwd: str, path_value: str, workspace: Optional[str] = None) -> List[str]:
+WORK_ROOT = os.path.expanduser("~/.cerver/work")
+
+
+def work_folder(cwd: str, policy: Optional[Dict[str, object]] = None) -> str:
+    """Where the agent works. Asked to work in the whole home folder (an
+    "Ask Compute Pool" question has no project) while this computer keeps
+    agents in their own folder: ~/.cerver/work/ask instead (one stable folder,
+    so a follow-up finds its conversation)."""
+    p = policy or load()
+    if p["agent_access"] not in ("own_folder", "vm"):
+        return cwd
+    c = os.path.realpath(cwd)
+    home = os.path.realpath(os.path.expanduser("~"))
+    if c == home or c in ("/", "/Users", "/home"):
+        # One stable folder, so a follow-up (--resume) finds its conversation.
+        d = os.path.join(WORK_ROOT, "ask")
+        os.makedirs(d, mode=0o700, exist_ok=True)
+        return d
+    return cwd
+
+
+def wrap(argv: List[str], cwd: str, path_value: str, workspace: Optional[str] = None, env: Optional[Dict[str, str]] = None) -> List[str]:
     """argv that runs the owner's agent under this computer's rules (unchanged
     when there are none). Raises PermissionError when a rule can't be kept."""
     policy = load()
     if not active(policy):
         return argv
     check_cwd(cwd, policy)
+    if policy["agent_access"] == "vm":
+        from . import vm_runtime
+        return vm_runtime.wrap(argv, cwd, env or {})
     system = platform.system()
     if system == "Darwin":
         if not os.path.exists(guest_fence.SANDBOX_EXEC):

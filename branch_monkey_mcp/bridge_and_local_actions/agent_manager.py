@@ -489,7 +489,19 @@ class LocalAgentManager:
             model=(agent.cli_model or None),
         )
         cli_cmd = self._add_session_tools(agent, cli_cmd)
-        process = spawn_cli_subprocess(cli_cmd, agent.work_dir, extra_env=agent.extra_env, pool_session=agent.pool_session)
+        try:
+            process = spawn_cli_subprocess(cli_cmd, agent.work_dir, extra_env=agent.extra_env, pool_session=agent.pool_session)
+        except PermissionError as e:
+            # This computer's security rules (Security page) stopped the start.
+            # Say so as the answer, instead of a silent wait until timeout.
+            print(f"[LocalAgent] Not started (security rules): {e}")
+            agent.status = "failed"
+            self._post_transcript_entries(agent, [{"role": "assistant", "kind": "text", "content": f"I couldn't start: {e}"}])
+            try:
+                asyncio.get_running_loop().create_task(self._push_cerver_status(agent, "failed", "security rules"))
+            except RuntimeError:
+                pass
+            return
 
         agent.pid = process.pid
         agent.process = process

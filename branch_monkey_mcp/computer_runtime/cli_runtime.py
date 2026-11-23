@@ -285,6 +285,9 @@ def spawn_cli_subprocess(
         f"host_key_kind={_key_kind(os.environ.get('ANTHROPIC_API_KEY', ''))}"
     )
     args = list(cli_cmd.args)
+    if not pool_session:
+        from . import agent_policy
+        cwd = agent_policy.work_folder(cwd)
     if pool_session:
         # Someone else's agent: run the CLI inside the guest fence, so it can
         # only reach its own workspace (cwd), never the owner's files.
@@ -294,7 +297,7 @@ def spawn_cli_subprocess(
         # Your own agent: this computer's security rules (agent_policy.py),
         # set on the Security page of the Cerver app. No rules, no change.
         from . import agent_policy
-        args = agent_policy.wrap(args, cwd, env.get("PATH", ""))
+        args = agent_policy.wrap(args, cwd, env.get("PATH", ""), env=env)
     return subprocess.Popen(
         args,
         # An empty input, never the relay's own. A relay started in the
