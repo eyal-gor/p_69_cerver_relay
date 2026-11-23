@@ -33,9 +33,9 @@ def note_session(sandbox_id: str, engine: str, metadata: Optional[Dict[str, Any]
     }
 
 
-def start(sandbox_id: str, task: str) -> str:
+def start(sandbox_id: str, task: str, info: Optional[Dict[str, Any]] = None) -> str:
     jid = uuid.uuid4().hex[:10]
-    s = {"engine": "", "cli": "", "from": "", "project": "", "session": "", **_sessions.get(sandbox_id, {})}
+    s = {"engine": "", "cli": "", "from": "", "project": "", "session": "", **_sessions.get(sandbox_id, {}), **(info or {})}
     words = " ".join((task or "").split())
     _running[jid] = {"id": jid, "at": time.time(), "task": words[:160], **s, "status": "running"}
     return jid

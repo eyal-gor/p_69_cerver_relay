@@ -513,6 +513,28 @@ class LocalAgentManager:
             self._read_json_output(agent)
         )
 
+    # The Agents page of the Cerver app: one line per turn this computer ran.
+    def _job_start(self, agent, message: str) -> None:
+        try:
+            from ..cerver_compute import jobs as job_log
+            agent._job_id = job_log.start(agent.id, message, {
+                "cli": agent.cli_tool or "",
+                "from": "someone you invited" if agent.pool_session else "you",
+                "project": agent.task_title or "",
+            })
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _job_end(self, agent) -> None:
+        try:
+            from ..cerver_compute import jobs as job_log
+            jid = getattr(agent, "_job_id", None)
+            if jid:
+                job_log.end(jid, agent.exit_code in (None, 0) and not agent.watchdog_killed)
+                agent._job_id = None
+        except Exception:  # noqa: BLE001
+            pass
+
     async def spawn_cli_process(self, agent_id: str, message: str, image_paths: List[str] = None, pre_logged: bool = False) -> None:
         """Spawn a CLI process from a quiescent agent.
 
@@ -553,6 +575,7 @@ class LocalAgentManager:
         # producing assistant output — but only if the gateway didn't
         # already write it via recordInput (pre_logged=True case).
         agent.turn_input_at = datetime.now(timezone.utc)
+        self._job_start(agent, message)
         if not pre_logged:
             self._push_user_message(agent, message)
 
@@ -848,6 +871,7 @@ class LocalAgentManager:
         # the CLI's exit. It used to be the agent's whole life, so a chat's
         # 5-second answer read "Run completed · 56m".
         cli_exited_at = datetime.now(timezone.utc)
+        self._job_end(agent)
         turn_input_at = agent.turn_input_at or agent.created_at.astimezone(timezone.utc)
         duration_ms = int((cli_exited_at - turn_input_at).total_seconds() * 1000)
         session_completed_event = CliProvider.make_session_completed_event(
@@ -1941,6 +1965,7 @@ class LocalAgentManager:
         # unless the gateway already wrote it (pre_logged=True), in which
         # case skip to avoid the double-entry bug.
         agent.turn_input_at = datetime.now(timezone.utc)
+        self._job_start(agent, message)
         if not pre_logged:
             self._push_user_message(agent, message)
 

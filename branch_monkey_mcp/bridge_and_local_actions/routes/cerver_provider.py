@@ -168,20 +168,20 @@ async def run_provider_session(sandbox_id: str, request: ProviderRunRequest):
         The collected run result (output and exit status).
     """
     timeout_seconds = max(5, int(request.timeout or DEFAULT_TIMEOUT_SECONDS))
-    jid = job_log.start(sandbox_id, request.code)
-    ok, err = False, ""
-    try:
-        if get_shell_sandbox(sandbox_id):
+    if get_shell_sandbox(sandbox_id):
+        # Agent turns are logged by the agent manager; shell steps here.
+        jid = job_log.start(sandbox_id, request.code, {"cli": "shell"})
+        ok, err = False, ""
+        try:
             out = await run_in_shell_sandbox(sandbox_id, request.code, timeout_seconds, request.envs)
-        else:
-            out = await collect_provider_run(agent_manager, sandbox_id, request.code, timeout_seconds)
-        ok = not (isinstance(out, dict) and (out.get("error") or out.get("exit_code") not in (None, 0)))
-        return out
-    except Exception as e:  # noqa: BLE001
-        err = str(e)
-        raise
-    finally:
-        job_log.end(jid, ok, err)
+            ok = isinstance(out, dict) and out.get("exit_code") in (None, 0)
+            return out
+        except Exception as e:  # noqa: BLE001
+            err = str(e)
+            raise
+        finally:
+            job_log.end(jid, ok, err)
+    return await collect_provider_run(agent_manager, sandbox_id, request.code, timeout_seconds)
 
 
 @router.post("/provider/sandboxes/{sandbox_id}/run/stream")
@@ -211,22 +211,8 @@ async def stream_provider_session(sandbox_id: str, request: ProviderRunRequest, 
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "Access-Control-Allow-Origin": "*"},
         )
-    async def _logged():
-        jid = job_log.start(sandbox_id, request.code)
-        ok = True
-        try:
-            async for ev in provider_stream_events(agent_manager, raw_request, sandbox_id, request.code):
-                if isinstance(ev, str) and '"type": "error"' in ev:
-                    ok = False
-                yield ev
-        except Exception:  # noqa: BLE001
-            ok = False
-            raise
-        finally:
-            job_log.end(jid, ok)
-
     return StreamingResponse(
-        _logged(),
+        provider_stream_events(agent_manager, raw_request, sandbox_id, request.code),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
