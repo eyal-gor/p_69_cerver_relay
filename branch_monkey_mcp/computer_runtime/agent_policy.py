@@ -13,6 +13,8 @@ The owner sets it in the Cerver app (Security page); it lives in
   vm          the agent runs in a fresh Linux VM (Apple's container tool,
               provisioned with `cerver vm`) that sees only its folder.
   blocked_folders  never readable or writable by any agent, in either mode.
+  allowed_folders  own_folder mode: folders agents may also open, besides the
+              one they work in (e.g. ~/Code). Blocked folders still win.
 
 Enforced with the system sandbox, the same one the guest fence uses
 (guest_fence.py): sandbox-exec on macOS, bubblewrap on Linux. When a rule is
@@ -48,7 +50,7 @@ def load() -> Dict[str, object]:
     """The saved policy, with defaults. A broken file means the strict reading
     of what is there is impossible, so it falls back to as_you with no blocked
     folders, and says so in ``problem``."""
-    out: Dict[str, object] = {"agent_access": "as_you", "blocked_folders": []}
+    out: Dict[str, object] = {"agent_access": "as_you", "blocked_folders": [], "allowed_folders": []}
     if not os.path.exists(POLICY_FILE):
         return out
     try:
@@ -63,6 +65,9 @@ def load() -> Dict[str, object]:
     blocked = raw.get("blocked_folders")
     if isinstance(blocked, list):
         out["blocked_folders"] = [str(b) for b in blocked if isinstance(b, str) and b.strip()]
+    allowed = raw.get("allowed_folders")
+    if isinstance(allowed, list):
+        out["allowed_folders"] = [str(b) for b in allowed if isinstance(b, str) and b.strip()]
     return out
 
 
@@ -82,6 +87,8 @@ def report() -> Dict[str, object]:
     out = {
         "mode": p["agent_access"],
         "blocked_folders": p["blocked_folders"],
+        "allowed_folders": p.get("allowed_folders", []),
+        "ask_folder": os.path.join(WORK_ROOT, "ask"),
         "enforced_by": why if ok else None,
     }
     if "problem" in p:
@@ -110,6 +117,8 @@ def seatbelt_profile(cwd: str, path_value: str, policy: Dict[str, object]) -> st
             '(allow file-read* (literal "/Users") (literal ' + _sb(home) + "))",
             f"(allow file-read* file-write* (subpath {_sb(os.path.realpath(cwd))}))",
         ]
+        for a in policy.get("allowed_folders", []):  # type: ignore[union-attr]
+            lines.append(f"(allow file-read* file-write* (subpath {_sb(_real(a))}))")
         for item in _AGENT_HOME_ITEMS:
             p = os.path.join(home, item)
             kind = "subpath" if not item.endswith(".json") else "literal"
@@ -138,6 +147,10 @@ def bwrap_args(cwd: str, path_value: str, policy: Dict[str, object]) -> List[str
             args += ["--ro-bind", d, d]
         c = os.path.realpath(cwd)
         args += ["--bind", c, c]
+        for a in policy.get("allowed_folders", []):  # type: ignore[union-attr]
+            r = _real(a)
+            if os.path.isdir(r):
+                args += ["--bind", r, r]
     for b in blocked_paths(policy):
         if os.path.isdir(b):
             args += ["--tmpfs", b]
