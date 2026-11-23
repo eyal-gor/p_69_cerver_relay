@@ -13,6 +13,9 @@ The owner sets it in the Cerver app (Security page); it lives in
   vm          the agent runs in a fresh Linux VM (Apple's container tool,
               provisioned with `cerver vm`) that sees only its folder.
   blocked_folders  never readable or writable by any agent, in either mode.
+  start_folder  where an agent starts when the request names no folder
+              (Ask Compute Pool, `cerver run`); default ~/.cerver/work/ask
+              in own_folder mode, the relay's folder otherwise.
   allowed_folders  own_folder mode: folders agents may also open, besides the
               one they work in (e.g. ~/Code). Blocked folders still win.
 
@@ -65,6 +68,9 @@ def load() -> Dict[str, object]:
     blocked = raw.get("blocked_folders")
     if isinstance(blocked, list):
         out["blocked_folders"] = [str(b) for b in blocked if isinstance(b, str) and b.strip()]
+    sf = raw.get("start_folder")
+    if isinstance(sf, str) and sf.strip() and os.path.isdir(os.path.expanduser(sf)):
+        out["start_folder"] = sf
     allowed = raw.get("allowed_folders")
     if isinstance(allowed, list):
         out["allowed_folders"] = [str(b) for b in allowed if isinstance(b, str) and b.strip()]
@@ -89,11 +95,23 @@ def report() -> Dict[str, object]:
         "blocked_folders": p["blocked_folders"],
         "allowed_folders": p.get("allowed_folders", []),
         "ask_folder": os.path.join(WORK_ROOT, "ask"),
+        # Where an agent starts when the request names no folder (Ask Compute
+        # Pool, `cerver run`), after this computer's rules.
+        "start_folder": _start_folder(p),
         "enforced_by": why if ok else None,
     }
     if "problem" in p:
         out["problem"] = p["problem"]
     return out
+
+
+def _start_folder(p: Dict[str, object]) -> str:
+    try:
+        from ..bridge_and_local_actions.config import get_default_working_dir
+        d = get_default_working_dir()
+    except Exception:  # noqa: BLE001
+        d = os.path.expanduser("~")
+    return work_folder(d, p)
 
 
 def active(policy: Optional[Dict[str, object]] = None) -> bool:
@@ -176,11 +194,14 @@ def work_folder(cwd: str, policy: Optional[Dict[str, object]] = None) -> str:
     agents in their own folder: ~/.cerver/work/ask instead (one stable folder,
     so a follow-up finds its conversation)."""
     p = policy or load()
-    if p["agent_access"] not in ("own_folder", "vm"):
-        return cwd
     c = os.path.realpath(cwd)
     home = os.path.realpath(os.path.expanduser("~"))
-    if c == home or c in ("/", "/Users", "/home"):
+    no_folder = c == home or c in ("/", "/Users", "/home")
+    if no_folder and p.get("start_folder"):  # the owner chose where agents start
+        return os.path.realpath(os.path.expanduser(str(p["start_folder"])))
+    if p["agent_access"] not in ("own_folder", "vm"):
+        return cwd
+    if no_folder:
         # One stable folder, so a follow-up (--resume) finds its conversation.
         d = os.path.join(WORK_ROOT, "ask")
         os.makedirs(d, mode=0o700, exist_ok=True)
