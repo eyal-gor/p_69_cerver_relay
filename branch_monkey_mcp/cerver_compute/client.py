@@ -18,6 +18,8 @@ import uuid
 
 import httpx
 
+from ..computer_runtime import keep_awake
+
 from ..computer_runtime.capabilities import get_runtime_capabilities
 from ..computer_runtime.machine_state import get_machine_state
 
@@ -279,6 +281,8 @@ class CerverComputeClient:
             "home_directory": machine_state.get("home_directory"),
             "relay": machine_state.get("relay"),
             "relay_machine_id": machine_state.get("machine_id"),
+            # On = stays awake, and its owner is emailed if it goes offline.
+            "keep_awake": keep_awake.wanted(),
         }
 
     def _build_connection(self) -> Dict[str, Any]:

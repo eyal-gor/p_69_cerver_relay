@@ -46,6 +46,7 @@ import httpx
 import websockets
 
 from .cerver_compute import CerverComputeClient
+from .computer_runtime.keep_awake import KeepAwake
 from .cerver_connect_transport import CerverConnectTransport, set_active_transport
 from .connection_logger import connection_logger
 from .kompany_local_transport.relay_forwarding import (
@@ -233,6 +234,8 @@ class RelayClient:
         self.tui = tui
         self._request_count = 0
         self._cerver_client: Optional[CerverComputeClient] = None
+        self._keep_awake = KeepAwake()
+        self._keep_awake_task: Optional[asyncio.Task] = None
         self._cerver_connect_transport: Optional[CerverConnectTransport] = None
         self._cerver_connect_task: Optional[asyncio.Task] = None
 
@@ -897,6 +900,7 @@ class RelayClient:
         self._cerver_network_task = asyncio.create_task(self._cerver_network_loop())
         self._update_check_task = asyncio.create_task(self._update_check_loop())
         self._infisical_refresh_task = asyncio.create_task(self._infisical_refresh_loop())
+        self._keep_awake_task = asyncio.create_task(self._keep_awake_loop())
 
         try:
             # Keep running until stopped
@@ -930,6 +934,9 @@ class RelayClient:
                 self._cerver_network_task.cancel()
             if self._reconnect_task:
                 self._reconnect_task.cancel()
+            if self._keep_awake_task:
+                self._keep_awake_task.cancel()
+            self._keep_awake.release()
 
             # Cancel all tracked fire-and-forget tasks
             for task in list(self._background_tasks):
@@ -1458,6 +1465,15 @@ class RelayClient:
                 # without overwriting the channel's own state.
                 self._tui_update(cerver_http_error=str(e)[:80])
 
+    async def _keep_awake_loop(self):
+        """Hold or release the keep-awake setting (~/.cerver/awake.json), every minute."""
+        while self._running:
+            try:
+                self._keep_awake.sync()
+            except Exception as e:
+                print(f"[Relay] Keep awake: {e}")
+            await asyncio.sleep(60)
+
     async def _cerver_network_loop(self):
         """Poll the account's Cerver compute network for the TUI."""
         interval = 10 if self.tui else 60
@@ -1682,6 +1698,7 @@ class RelayClient:
         # requiring restarts. Same loop the dual-mode path uses.
         self._update_check_task = asyncio.create_task(self._update_check_loop())
         self._infisical_refresh_task = asyncio.create_task(self._infisical_refresh_loop())
+        self._keep_awake_task = asyncio.create_task(self._keep_awake_loop())
         # Stats loop drives the Runtime tab's "Live agents" + COMPUTE
         # rows in the TUI. Was previously only started in the full
         # connect() path, so cerver-only relays (which is the default
@@ -1714,6 +1731,9 @@ class RelayClient:
                     await asyncio.gather(self._cerver_network_task, return_exceptions=True)
                 except Exception:
                     pass
+            if self._keep_awake_task:
+                self._keep_awake_task.cancel()
+            self._keep_awake.release()
             await self._stop_cerver_connect_transport()
             await self._unregister_cerver_compute()
 
