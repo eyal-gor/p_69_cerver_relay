@@ -33,8 +33,8 @@ CATALOG: List[Dict[str, Any]] = [
     {"name": "qwen3:14b", "size_gb": 9.3, "min_ram_gb": 24, "label": "Qwen3 14B", "good_for": "better reasoning and tool use"},
     {"name": "gpt-oss:20b", "size_gb": 14.0, "min_ram_gb": 32, "label": "gpt-oss 20B", "good_for": "OpenAI's open model, strong tool use"},
 ]
-# Never leave the disk nearly full after a download.
-SPARE_DISK_GB = 10
+# Keep 30 GB free after a download: the OS, apps and agents need room too.
+SPARE_DISK_GB = 30
 
 _pull: Dict[str, Any] = {}
 _lock = threading.Lock()

@@ -416,6 +416,11 @@ class CerverComputeClient:
                 self._clear_persisted_auth()
                 await self.ensure_authenticated()
                 continue
+            if response.status_code == 409 and _is_removed(response):
+                # The owner removed this computer from the pool: stop for good.
+                from .leave import leave
+                leave(self.compute_id)
+                self.compute_id = None
             response.raise_for_status()
             return response.json()
         raise RuntimeError("Cerver auth retry exhausted")
@@ -564,3 +569,10 @@ class CerverComputeClient:
                 response.raise_for_status()
         except Exception:
             return
+
+
+def _is_removed(response: "httpx.Response") -> bool:
+    try:
+        return response.json().get("kind") == "compute_removed"
+    except Exception:  # noqa: BLE001
+        return False

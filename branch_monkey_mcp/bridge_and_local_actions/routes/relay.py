@@ -66,3 +66,10 @@ def relay_diagnostics():
     # Merge in current relay status for full picture
     diag["relay_status"] = get_relay_status()
     return diag
+
+
+@router.post("/leave")
+async def leave_pool():
+    """The owner removed this computer from the pool (via the gateway)."""
+    from ...cerver_compute.leave import leave
+    return {"ok": leave(), "say": "This computer is leaving the pool."}
