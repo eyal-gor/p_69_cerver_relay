@@ -194,9 +194,15 @@ def _p2p_ok() -> bool:
 def _provisioning() -> dict:
     try:
         from .vm_runtime import status
-        return {"vm": status()}
+        out = {"vm": status()}
     except Exception as e:  # noqa: BLE001
-        return {"vm": {"supported": False, "why": str(e)}}
+        out = {"vm": {"supported": False, "why": str(e)}}
+    try:
+        from .models_provisioning import summary
+        out["models"] = summary()
+    except Exception as e:  # noqa: BLE001
+        out["models"] = {"problem": str(e)}
+    return out
 
 
 def _agent_access() -> dict:

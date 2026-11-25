@@ -10,6 +10,8 @@ Ollama's own OpenAI-compatible endpoint does the work; nothing is sent
 anywhere else.
 """
 
+import asyncio
+
 import httpx
 from fastapi import APIRouter, HTTPException, Request
 
@@ -23,7 +25,30 @@ TIMEOUT_S = 170.0
 
 @router.get("")
 async def models():
-    return {"models": list_local_models()}
+    """Provisioning status: Ollama, the models here, and what fits."""
+    from ...computer_runtime.models_provisioning import status
+    return await asyncio.to_thread(status)
+
+
+@router.post("/provision")
+async def provision(request: Request):
+    """The owner's Provisioning buttons: {action: install_ollama|start_ollama|pull|remove, name?}."""
+    from ...computer_runtime import models_provisioning as mp
+    body = await request.json()
+    action = (body or {}).get("action")
+    name = (body or {}).get("name") or ""
+    fn = {
+        "install_ollama": lambda: mp.install_ollama(),
+        "start_ollama": lambda: mp.start_ollama(),
+        "pull": lambda: mp.pull(name),
+        "remove": lambda: mp.remove(name),
+    }.get(action)
+    if not fn:
+        raise HTTPException(400, "action is one of: install_ollama, start_ollama, pull, remove")
+    result = await asyncio.to_thread(fn)
+    if not result.get("ok"):
+        raise HTTPException(409, result.get("error") or "Failed")
+    return {**result, "status": await asyncio.to_thread(mp.status)}
 
 
 @router.post("/chat")
