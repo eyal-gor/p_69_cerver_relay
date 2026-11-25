@@ -21,6 +21,7 @@ from .cerver_provider import router as cerver_provider_router
 from .logs import router as logs_router
 from .live import router as live_router
 from .p2p import router as p2p_router
+from .models import router as models_router
 
 # Create main router that includes all sub-routers
 main_router = APIRouter()
@@ -30,6 +31,7 @@ main_router.include_router(health_router, tags=["health"])
 main_router.include_router(relay_router, prefix="/api/relay", tags=["relay"])
 main_router.include_router(live_router, prefix="/api/live", tags=["live"])
 main_router.include_router(p2p_router, prefix="/api/p2p", tags=["p2p"])
+main_router.include_router(models_router, prefix="/api/models", tags=["models"])
 main_router.include_router(agents_router, prefix="/api/local-claude", tags=["agents"])
 main_router.include_router(git_router, prefix="/api", tags=["git"])
 main_router.include_router(worktrees_router, prefix="/api/local-claude", tags=["worktrees"])
