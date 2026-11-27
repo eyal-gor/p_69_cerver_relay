@@ -39,11 +39,16 @@ dependencies = [
     "uvicorn>=0.22.0",
     "pyngrok>=7.0.0",
     "pyyaml>=6.0",
+    # WebRTC: `cerver forward` and live screen. Core now, so in every install
+    # (it was the opt-in "live" extra, which left forwarding broken by default).
+    "aiortc>=1.9",
+    "mss>=9.0",
+    "numpy>=1.24",
 ]
 
 [project.optional-dependencies]
-# Live screen over WebRTC (routes/live.py). Heavy (ships ffmpeg via av), so opt-in.
-live = ["aiortc>=1.9", "mss>=9.0", "numpy>=1.24"]
+# Kept so old install lines with [live] still resolve; the packages are now core.
+live = []
 
 [project.scripts]
 # Cerver-facing binaries. The relay registers your machine as a private
